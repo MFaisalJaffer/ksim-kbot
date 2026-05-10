@@ -254,6 +254,10 @@ def run_viewer_with_policy(ckpt_path: str) -> None:
 
                 step_start = time.time()
 
+                # Propagate viewer push forces into the JAX physics state
+                env_states.physics_state.data.xfrc_applied[:] = mj_data.xfrc_applied
+                mj_data.xfrc_applied[:] = 0  # clear so forces don't accumulate
+
                 transition, env_states = task.step_engine(
                     constants=constants,
                     env_states=env_states,
