@@ -305,10 +305,10 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
 
     def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> ksim.Metadata:
         import asyncio
-        return asyncio.run(ksim.get_mujoco_model_metadata("/home/faisal/.kscale/robots/kbot/robot/", cache=False))
+        return asyncio.run(ksim.get_mujoco_model_metadata(str(Path.home() / ".kscale/robots/kbot/robot/"), cache=False))
 
     def get_mujoco_model(self) -> mujoco.MjModel:
-        mjcf_path = "/home/faisal/.kscale/robots/kbot/robot/robot.mjcf"
+        mjcf_path = str(Path.home() / ".kscale/robots/kbot/robot/robot.mjcf")
         logger.info("Loading MJCF model from %s", mjcf_path)
 
         mj_model = load_mjmodel(mjcf_path, scene=self.config.terrain_type)
