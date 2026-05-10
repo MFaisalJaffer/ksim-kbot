@@ -26,13 +26,13 @@ from ksim.utils.priors import (
 from mujoco import mjx
 
 
-class TargetPositionMITActuators(ksim.MITPositionVelocityActuators):
+class TargetPositionMITActuators(ksim.PositionVelocityActuator):
     """MIT-mode actuator controller operating on position."""
 
     def __init__(
         self,
         physics_model: ksim.PhysicsModel,
-        joint_name_to_metadata: dict[str, JointMetadataOutput],
+        metadata: ksim.Metadata,
         default_targets: tuple[float, ...] = (),
         *,
         pos_action_noise: float = 0.0,
@@ -47,16 +47,16 @@ class TargetPositionMITActuators(ksim.MITPositionVelocityActuators):
     ) -> None:
         super().__init__(
             physics_model=physics_model,
-            joint_name_to_metadata=joint_name_to_metadata,
+            metadata=metadata,
             pos_action_noise=pos_action_noise,
             pos_action_noise_type=pos_action_noise_type,
             vel_action_noise=vel_action_noise,
             vel_action_noise_type=vel_action_noise_type,
             torque_noise=torque_noise,
             torque_noise_type=torque_noise_type,
-            ctrl_clip=ctrl_clip,
-            freejoint_first=freejoint_first,
         )
+        if ctrl_clip is not None:
+            self.ctrl_clip = jnp.array(ctrl_clip)
         self.action_scale = action_scale
         self.default_targets = jnp.array(default_targets)
 
@@ -64,12 +64,8 @@ class TargetPositionMITActuators(ksim.MITPositionVelocityActuators):
         """Get the control signal from the (position and velocity) action vector."""
         pos_rng, vel_rng, tor_rng = jax.random.split(rng, 3)
 
-        if self.freejoint_first:
-            current_pos = physics_data.qpos[7:]  # First 7 are always root pos.
-            current_vel = physics_data.qvel[6:]  # First 6 are always root vel.
-        else:
-            current_pos = physics_data.qpos[:]
-            current_vel = physics_data.qvel[:]
+        current_pos = physics_data.qpos[7:]  # First 7 are always root pos (freejoint).
+        current_vel = physics_data.qvel[6:]  # First 6 are always root vel.
 
         # Adds position and velocity noise.
         target_position = action[: len(current_pos)] * self.action_scale + self.default_targets

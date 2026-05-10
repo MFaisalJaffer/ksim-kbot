@@ -1,6 +1,10 @@
 # mypy: disable-error-code="override"
 """Defines simple task for training a standing policy for K-Bot."""
 
+import os
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -17,7 +21,7 @@ from ksim_kbot.standing.standing import NUM_INPUTS, KbotStandingTask, KbotStandi
 OBS_SIZE = 20 * 2 + 2 + 3 + 3 + 3 + 40  # = position + velocity + imu_acc + imu_gyro + projected_gravity + last_action
 CMD_SIZE = 3
 NUM_JOINTS = 20 * 2  # position + velocity
-ADDITIONAL_CRITIC_INPUT_SIZE = 2 + 3 + 4 + 3 + 3 + 20
+ADDITIONAL_CRITIC_INPUT_SIZE = 4 + 3 + 4 + 3 + 3 + 20  # feet_contact(4) + base_pos(3) + base_ori(4) + lin_vel(3) + ang_vel(3) + actuator_force(20)
 
 
 @jax.tree_util.register_dataclass
@@ -87,7 +91,9 @@ class KbotRNNActor(eqx.Module):
         self.max_std = max_std
         self.var_scale = var_scale
 
-    def forward(self, obs_n: Array, carry: Array) -> tuple[distrax.Distribution, Array]:
+    def forward(self, obs_n: Array, carry: Array) -> tuple[distrax.Normal, Array]:
+        if obs_n.shape[-1] != self.num_inputs:
+            raise ValueError(f"KbotRNNActor.forward: obs_n.shape={obs_n.shape}, expected num_inputs={self.num_inputs}")
         x_n = self.input_proj(obs_n)
         out_carries = []
         for i, rnn in enumerate(self.rnns):
@@ -205,7 +211,7 @@ class KbotStandingRNNTaskConfig(KbotStandingTaskConfig):
         help="The hidden size for the MLPs.",
     )
     depth: int = xax.field(
-        value=5,
+        value=2,
         help="The depth for the MLPs.",
     )
     num_mixtures: int = xax.field(
@@ -249,19 +255,19 @@ class KbotStandingRNNTask(KbotStandingTask[Config], Generic[Config]):
         ang_vel_cmd_z = commands["angular_velocity_command_z"]
         last_action_n = observations["last_action_observation"]
 
+        _shapes = {
+            "phase": timestep_phase_2.shape, "jpos": joint_pos_n.shape, "jvel": joint_vel_n.shape,
+            "acc": imu_acc_3.shape, "gyro": imu_gyro_3.shape, "grav": projected_gravity_3.shape,
+            "cx": lin_vel_cmd_x.shape, "cy": lin_vel_cmd_y.shape, "cz": ang_vel_cmd_z.shape,
+            "la": last_action_n.shape,
+        }
+        _total = sum(s[-1] if len(s) >= 1 else 1 for s in _shapes.values())
+        if _total != model.num_inputs:
+            raise ValueError(f"run_actor shape mismatch: total={_total} vs num_inputs={model.num_inputs}. shapes={_shapes}")
+
         obs_n = jnp.concatenate(
-            [
-                timestep_phase_2,
-                joint_pos_n,
-                joint_vel_n,
-                imu_acc_3,
-                imu_gyro_3,
-                projected_gravity_3,
-                lin_vel_cmd_x,
-                lin_vel_cmd_y,
-                ang_vel_cmd_z,
-                last_action_n,
-            ],
+            [timestep_phase_2, joint_pos_n, joint_vel_n, imu_acc_3, imu_gyro_3,
+             projected_gravity_3, lin_vel_cmd_x, lin_vel_cmd_y, ang_vel_cmd_z, last_action_n],
             axis=-1,
         )
 
@@ -324,12 +330,31 @@ class KbotStandingRNNTask(KbotStandingTask[Config], Generic[Config]):
     ) -> tuple[ksim.PPOVariables, tuple[Array, Array]]:
         actor_carry, critic_carry = carry
 
-        # Vectorize over the time dimensions.
-        action_dist_tj, actor_carry = self.run_actor(model.actor, trajectories.obs, trajectories.command, actor_carry)
-        log_probs_tj = action_dist_tj.log_prob(trajectories.action)
+        # Scan over the time dimension, unrolling the RNN step-by-step.
+        def actor_step(
+            ac: Array, t: Array
+        ) -> tuple[Array, tuple[Array, Array]]:
+            obs_t = jax.tree.map(lambda x: x[t], trajectories.obs)
+            cmd_t = jax.tree.map(lambda x: x[t], trajectories.command)
+            dist, new_ac = self.run_actor(model.actor, obs_t, cmd_t, ac)
+            return new_ac, (dist.loc, dist.scale)
 
-        # Gets the value by calling the critic.
-        values_t1, critic_carry = self.run_critic(model.critic, trajectories.obs, trajectories.command, critic_carry)
+        def critic_step(
+            cc: Array, t: Array
+        ) -> tuple[Array, Array]:
+            obs_t = jax.tree.map(lambda x: x[t], trajectories.obs)
+            cmd_t = jax.tree.map(lambda x: x[t], trajectories.command)
+            val, new_cc = self.run_critic(model.critic, obs_t, cmd_t, cc)
+            return new_cc, val
+
+        T = jax.tree.leaves(trajectories.obs)[0].shape[0]
+        ts = jnp.arange(T)
+
+        actor_carry, (means_tj, stds_tj) = jax.lax.scan(actor_step, actor_carry, ts)
+        critic_carry, values_t1 = jax.lax.scan(critic_step, critic_carry, ts)
+
+        action_dists = distrax.Normal(means_tj, stds_tj)
+        log_probs_tj = action_dists.log_prob(trajectories.action)
 
         ppo_variables = ksim.PPOVariables(
             log_probs=log_probs_tj,
@@ -338,7 +363,7 @@ class KbotStandingRNNTask(KbotStandingTask[Config], Generic[Config]):
 
         return ppo_variables, (actor_carry, critic_carry)
 
-    def get_initial_carry(self, rng: PRNGKeyArray) -> tuple[Array, Array]:
+    def get_initial_model_carry(self, rng: PRNGKeyArray) -> tuple[Array, Array]:
         return (
             jnp.zeros(shape=(self.config.depth, self.config.hidden_size)),
             jnp.zeros(shape=(self.config.depth, self.config.hidden_size)),
@@ -347,14 +372,15 @@ class KbotStandingRNNTask(KbotStandingTask[Config], Generic[Config]):
     def sample_action(
         self,
         model: KbotRNNModel,
-        carry: tuple[Array, Array],
+        model_carry: tuple[Array, Array],
         physics_model: ksim.PhysicsModel,
         physics_state: ksim.PhysicsState,
         observations: xax.FrozenDict[str, Array],
         commands: xax.FrozenDict[str, Array],
         rng: PRNGKeyArray,
+        argmax: bool = False,
     ) -> ksim.Action:
-        actor_carry_in, critic_carry_in = carry
+        actor_carry_in, critic_carry_in = model_carry
 
         # Runs the actor model to get the action distribution.
         action_dist_j, actor_carry = self.run_actor(
@@ -364,7 +390,7 @@ class KbotStandingRNNTask(KbotStandingTask[Config], Generic[Config]):
             carry=actor_carry_in,
         )
 
-        action_j = action_dist_j.sample(seed=rng)
+        action_j = action_dist_j.mode() if argmax else action_dist_j.sample(seed=rng)
 
         return ksim.Action(
             action=action_j,
@@ -382,26 +408,28 @@ if __name__ == "__main__":
     #  run_environment_save_path=videos/test.mp4
     KbotStandingRNNTask.launch(
         KbotStandingRNNTaskConfig(
-            num_envs=8192,
-            batch_size=256,
-            num_passes=10,
+            num_envs=512,
+            batch_size=64,
+            num_passes=1,
             epochs_per_log_step=1,
             # Simulation parameters.
             dt=0.002,
             ctrl_dt=0.02,
-            max_action_latency=0.0,
+            iterations=6,
+            ls_iterations=6,
+            action_latency_range=(0.0, 0.0),
             rollout_length_seconds=1.25,
             # PPO parameters
             action_scale=0.5,
             gamma=0.97,
             lam=0.95,
-            entropy_coef=0.005,
-            learning_rate=1e-4,
-            clip_param=0.3,
-            max_grad_norm=0.5,
+            entropy_coef=0.01,
+            learning_rate=3e-5,
+            clip_param=0.2,
+            max_grad_norm=0.3,
             use_mit_actuators=True,
             save_every_n_steps=25,
             export_for_inference=True,
-            domain_randomize=True,
+            domain_randomize=False,
         ),
     )

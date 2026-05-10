@@ -6,11 +6,12 @@ If some logic will become more general, we can move it to ksim or xax.
 from typing import Literal, Self
 
 import attrs
+import jax
 import jax.numpy as jnp
 import ksim
 import xax
 from jax.scipy.spatial.transform import Rotation
-from jaxtyping import Array
+from jaxtyping import Array, PRNGKeyArray, PyTree
 from ksim.utils.mujoco import get_qpos_data_idxs_by_name
 
 
@@ -234,6 +235,202 @@ class KneeDeviationPenalty(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class KneeRangeOfMotion(ksim.Reward):
+    """Diagnostic metric: logs knee joint range of motion per trajectory. Not a real reward (scale=0)."""
+
+    knee_indices: tuple[int, ...] = attrs.field()
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        knee_pos = trajectory.qpos[..., jnp.array(self.knee_indices) + 7]
+        # Return per-timestep max absolute angle across both knees
+        return jnp.abs(knee_pos).max(axis=-1)
+
+    @classmethod
+    def create(cls, physics_model: ksim.PhysicsModel, knee_names: tuple[str, ...]) -> "KneeRangeOfMotion":
+        mappings = get_qpos_data_idxs_by_name(physics_model)
+        knee_indices = tuple([int(mappings[name][0]) - 7 for name in knee_names])
+        return cls(scale=0.001, knee_indices=knee_indices)
+
+
+@attrs.define(frozen=True, kw_only=True)
+class SingleFootContactReward(ksim.StatefulReward):
+    """Reward having one and only one foot in contact with the ground while walking.
+
+    Allows a small grace period where both feet may be in contact, for less jumpy gaits.
+    Adapted from kscalelabs/ksim/examples/kbot/train.py to use the
+    `feet_contact_observation` (2-vec) and our split linear/angular velocity commands.
+    """
+
+    ctrl_dt: float = 0.02
+    grace_period: float = 0.2  # seconds
+    contact_threshold: float = 0.1
+    feet_contact_obs_name: str = attrs.field(default="feet_contact_observation")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+
+    def initial_carry(self, rng: PRNGKeyArray) -> PyTree:
+        return jnp.array([0.0])
+
+    def get_reward_stateful(self, traj: ksim.Trajectory, reward_carry: PyTree) -> tuple[Array, PyTree]:
+        feet_contact = traj.obs[self.feet_contact_obs_name]  # (T, 2): [left, right]
+        left_contact = feet_contact[..., 0] > self.contact_threshold
+        right_contact = feet_contact[..., 1] > self.contact_threshold
+        single = jnp.logical_xor(left_contact, right_contact)
+
+        lin_cmd = traj.command[self.linear_velocity_cmd_name]
+        ang_cmd = traj.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([lin_cmd, ang_cmd], axis=-1), axis=-1)
+        is_zero_cmd = cmd_norm < 1e-3
+
+        def _body(time_since_single_contact: Array, inputs: tuple[Array, Array]) -> tuple[Array, Array]:
+            is_single, is_zero = inputs
+            new_time = jnp.where(is_single, 0.0, time_since_single_contact + self.ctrl_dt)
+            # If zero command, reset grace timer so standing isn't penalized.
+            new_time = jnp.where(is_zero, self.grace_period, new_time)
+            return new_time, new_time
+
+        carry, time_since_single_contact = jax.lax.scan(_body, reward_carry, (single, is_zero_cmd))
+        within_grace = time_since_single_contact < self.grace_period
+        reward = jnp.where(is_zero_cmd, 1.0, within_grace[:, 0])
+        return reward, carry
+
+
+@attrs.define(frozen=True, kw_only=True)
+class FeetAirtimeReward(ksim.StatefulReward):
+    """Encourages reasonable step frequency by rewarding long swing phases.
+
+    Pays out at the moment a foot first contacts the ground (after being airborne)
+    a value of (airtime - touchdown_penalty). With touchdown_penalty=0.4s:
+    - airtime < 0.4s (e.g. marching in place): NEGATIVE reward at touchdown
+    - airtime > 0.4s (real walking step): POSITIVE reward at touchdown
+
+    Disabled during zero-velocity commands (so standing isn't penalized).
+    Adapted from kscalelabs/ksim/examples/kbot/train.py to use our two-vector
+    `feet_contact_observation` and split linear/angular velocity commands.
+    """
+
+    ctrl_dt: float = 0.02
+    touchdown_penalty: float = 0.4
+    feet_contact_obs_name: str = attrs.field(default="feet_contact_observation")
+    contact_threshold: float = 0.1
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+
+    def initial_carry(self, rng: PRNGKeyArray) -> PyTree:
+        # Flat shape (4,): [airtime_left, airtime_right, prev_contact_left, prev_contact_right]
+        # The installed ksim version doesn't handle tuple carries in jnp.where, so we pack
+        # everything into a single float array. Contacts stored as 0.0/1.0.
+        return jnp.array([0.0, 0.0, 1.0, 1.0])
+
+    def _compute_airtime(self, initial_airtime: Array, contact_bool: Array, done: Array) -> tuple[Array, Array]:
+        def _body(time_since_liftoff: Array, is_contact: Array) -> tuple[Array, Array]:
+            new_time = jnp.where(is_contact, 0.0, time_since_liftoff + self.ctrl_dt)
+            return new_time, new_time
+
+        contact_or_done = jnp.logical_or(contact_bool, done[:, None])
+        carry, airtime = jax.lax.scan(_body, initial_airtime, contact_or_done)
+        return carry, airtime
+
+    def _compute_first_contact(self, contact_carry: Array, contact_bool: Array) -> Array:
+        prev_contact = jnp.concatenate([contact_carry[None, :], contact_bool[:-1]], axis=0)
+        first_contact = jnp.logical_and(contact_bool, jnp.logical_not(prev_contact))
+        return first_contact
+
+    def get_reward_stateful(self, traj: ksim.Trajectory, reward_carry: PyTree) -> tuple[Array, PyTree]:
+        airtime_carry = reward_carry[:2]
+        contact_carry = reward_carry[2:] > 0.5  # bool (2,)
+
+        feet_contact = traj.obs[self.feet_contact_obs_name]  # (T, 2): [left, right]
+        contact = feet_contact > self.contact_threshold  # bool, shape (T, 2)
+
+        new_airtime_carry, airtime = self._compute_airtime(airtime_carry, contact, traj.done)
+        first_contact = self._compute_first_contact(contact_carry, contact) * ~traj.done[:, None]
+        # Shift airtime by 1 to match touchdowns with previous step's airtime.
+        airtime_shifted = jnp.concatenate([airtime_carry[None, :], airtime], axis=0)[:-1, :]
+        reward = jnp.sum(
+            (airtime_shifted - self.touchdown_penalty) * first_contact.astype(jnp.float32),
+            axis=-1,
+        )
+
+        # Disable when there is no velocity command.
+        lin_cmd = traj.command[self.linear_velocity_cmd_name]
+        ang_cmd = traj.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([lin_cmd, ang_cmd], axis=-1), axis=-1)
+        is_zero_cmd = cmd_norm < 1e-3
+        reward = jnp.where(is_zero_cmd, 0.0, reward)
+
+        # Pack new carry: (airtime_l, airtime_r, contact_l, contact_r) as float
+        new_reward_carry = jnp.concatenate([new_airtime_carry, contact[-1, :].astype(jnp.float32)])
+        return reward, new_reward_carry
+
+
+@attrs.define(frozen=True, kw_only=True)
+class MarchInPlacePenalty(ksim.Reward):
+    """Penalize lifting feet when commanded to translate but not actually translating.
+
+    Computes: penalty ∝ (max foot height) × (1 - velocity_match) × (cmd is active)
+    Returns a positive value (use with negative scale).
+
+    - When standing still and commanded to stand: 0 (cmd inactive)
+    - When walking and tracking velocity well: ~0 (velocity_match ≈ 1)
+    - When marching in place (feet up but body still): high penalty
+    """
+
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    linvel_obs_name: str = attrs.field(default="sensor_observation_local_linvel_origin")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    velocity_match_sensitivity: float = attrs.field(default=0.25)
+    foot_default_height: float = attrs.field(default=0.04)
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]
+        # Max foot height above default — how much the policy is "lifting feet"
+        foot_left_z = foot_pos[..., 2]
+        foot_right_z = foot_pos[..., 5]
+        max_lift = jnp.maximum(foot_left_z, foot_right_z) - self.foot_default_height
+        max_lift = jnp.maximum(max_lift, 0.0)
+
+        # How well actual velocity matches commanded velocity
+        vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
+        actual_xy_vel = trajectory.obs[self.linvel_obs_name][..., :2]
+        vel_err_sq = jnp.sum(jnp.square(vel_cmd - actual_xy_vel), axis=-1)
+        velocity_match = jnp.exp(-vel_err_sq / self.velocity_match_sensitivity)
+
+        # Only active when a velocity command is being given
+        lin_cmd_norm = jnp.linalg.norm(vel_cmd, axis=-1)
+        cmd_active = lin_cmd_norm > 1e-3
+
+        # Penalty: feet lifted × velocity not matching × command active
+        penalty = max_lift * (1.0 - velocity_match) * cmd_active
+        return penalty
+
+
+@attrs.define(frozen=True, kw_only=True)
+class NoContactPenalty(ksim.Reward):
+    """Penalty for having no foot in contact with the ground while walking (i.e., flying)."""
+
+    contact_threshold: float = 0.1
+    feet_contact_obs_name: str = attrs.field(default="feet_contact_observation")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+
+    def get_reward(self, traj: ksim.Trajectory) -> Array:
+        feet_contact = traj.obs[self.feet_contact_obs_name]
+        left_contact = feet_contact[..., 0] > self.contact_threshold
+        right_contact = feet_contact[..., 1] > self.contact_threshold
+        any_contact = jnp.logical_or(left_contact, right_contact)
+
+        lin_cmd = traj.command[self.linear_velocity_cmd_name]
+        ang_cmd = traj.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([lin_cmd, ang_cmd], axis=-1), axis=-1)
+        is_zero_cmd = cmd_norm < 1e-3
+
+        # Penalty (positive value) when both feet are airborne and command is non-zero.
+        # Returns 0 when zero command or when at least one foot is in contact.
+        return jnp.where(is_zero_cmd, 0.0, jnp.where(any_contact, 0.0, 1.0))
+
+
+@attrs.define(frozen=True, kw_only=True)
 class TerminationPenalty(ksim.Reward):
     """Penalty for termination."""
 
@@ -372,7 +569,13 @@ class StandStillReward(ksim.Reward):
 
 @attrs.define(frozen=True, kw_only=True)
 class FeetPhaseReward(ksim.Reward):
-    """Reward for tracking the desired foot height."""
+    """Reward for tracking the desired foot height.
+
+    If `translation_gated=True`, the reward is multiplied by a Gaussian gate of the
+    body's actual XY velocity tracking error (in body frame). This means the policy
+    only earns the gait-clock reward when it is *also* translating in the commanded
+    direction — preventing the "marching in place" failure mode.
+    """
 
     scale: float = 1.0
     feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
@@ -384,6 +587,10 @@ class FeetPhaseReward(ksim.Reward):
     sensitivity: float = attrs.field(default=0.01)
     foot_default_height: float = attrs.field(default=0.0)
     stand_still_threshold: float = attrs.field(default=0.0)
+    # Translation gate options:
+    translation_gated: bool = attrs.field(default=False)
+    translation_gate_sensitivity: float = attrs.field(default=0.25)
+    linvel_obs_name: str = attrs.field(default="sensor_observation_local_linvel_origin")
 
     def get_reward(self, trajectory: ksim.Trajectory) -> Array:
         if self.feet_pos_obs_name not in trajectory.obs:
@@ -415,6 +622,19 @@ class FeetPhaseReward(ksim.Reward):
         ang_vel_cmd = trajectory.command[self.angular_velocity_cmd_name]
         command_norm = jnp.linalg.norm(jnp.concatenate([vel_cmd, ang_vel_cmd], axis=-1), axis=-1)
         reward *= command_norm > self.stand_still_threshold
+
+        # Optional translation gate: suppress reward when commanded but not actually translating.
+        # Multiplies the foot-phase reward by exp(-‖cmd_vel - actual_xy_vel‖² / gate_sensitivity).
+        # Only active when a non-zero velocity command is present (otherwise pass through).
+        if self.translation_gated:
+            actual_xy_vel = trajectory.obs[self.linvel_obs_name][..., :2]
+            vel_err_sq = jnp.sum(jnp.square(vel_cmd - actual_xy_vel), axis=-1)
+            translation_match = jnp.exp(-vel_err_sq / self.translation_gate_sensitivity)
+            # If no linear velocity command, don't gate (let yaw-only commands still earn the reward).
+            lin_cmd_norm = jnp.linalg.norm(vel_cmd, axis=-1)
+            cmd_active = lin_cmd_norm > 1e-3
+            gate = jnp.where(cmd_active, translation_match, 1.0)
+            reward *= gate
 
         return reward
 

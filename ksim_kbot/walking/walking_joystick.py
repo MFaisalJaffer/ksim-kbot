@@ -14,7 +14,10 @@ import xax
 from jaxtyping import Array, PRNGKeyArray
 from kscale.web.gen.api import JointMetadataOutput
 from ksim.curriculum import Curriculum
-from xax.nn.export import export
+try:
+    from xax.nn.export import export
+except ModuleNotFoundError:
+    export = None  # type: ignore[assignment]
 
 from ksim_kbot import common, rewards as kbot_rewards
 from ksim_kbot.standing.standing import MAX_TORQUE, KbotStandingTask, KbotStandingTaskConfig
@@ -41,13 +44,13 @@ JOINT_TARGETS = (
     -0.23,
     0.0,
     0.0,
-    -0.441,
+    -0.873,
     0.195,
     # left leg
     0.23,
     0.0,
     0.0,
-    0.441,
+    0.873,
     -0.195,
 )
 
@@ -254,29 +257,29 @@ class KbotWalkingTask(KbotStandingTask[Config], Generic[Config]):
             vel_action_noise_type="gaussian",
             ctrl_clip=[
                 # right arm
-                MAX_TORQUE["03"],
-                MAX_TORQUE["03"],
-                MAX_TORQUE["02"],
-                MAX_TORQUE["02"],
-                MAX_TORQUE["00"],
+                MAX_TORQUE["04"],  # shoulder_pitch (22 Nm)
+                MAX_TORQUE["04"],  # shoulder_roll (22 Nm)
+                MAX_TORQUE["03"],  # shoulder_yaw
+                MAX_TORQUE["04"],  # elbow (22 Nm)
+                MAX_TORQUE["00"],  # wrist
                 # left arm
-                MAX_TORQUE["03"],
-                MAX_TORQUE["03"],
-                MAX_TORQUE["02"],
-                MAX_TORQUE["02"],
-                MAX_TORQUE["00"],
+                MAX_TORQUE["04"],  # shoulder_pitch (22 Nm)
+                MAX_TORQUE["04"],  # shoulder_roll (22 Nm)
+                MAX_TORQUE["03"],  # shoulder_yaw
+                MAX_TORQUE["04"],  # elbow (22 Nm)
+                MAX_TORQUE["00"],  # wrist
                 # right leg
-                MAX_TORQUE["04"],
-                MAX_TORQUE["03"],
-                MAX_TORQUE["03"],
-                MAX_TORQUE["04"],
-                MAX_TORQUE["02"],
+                MAX_TORQUE["04"],  # hip_pitch
+                MAX_TORQUE["04"],  # hip_roll (22 Nm)
+                MAX_TORQUE["03"],  # hip_yaw
+                MAX_TORQUE["04"],  # knee
+                MAX_TORQUE["02"],  # ankle
                 # left leg
-                MAX_TORQUE["04"],
-                MAX_TORQUE["03"],
-                MAX_TORQUE["03"],
-                MAX_TORQUE["04"],
-                MAX_TORQUE["02"],
+                MAX_TORQUE["04"],  # hip_pitch
+                MAX_TORQUE["04"],  # hip_roll (22 Nm)
+                MAX_TORQUE["03"],  # hip_yaw
+                MAX_TORQUE["04"],  # knee
+                MAX_TORQUE["02"],  # ankle
             ],
             action_scale=self.config.action_scale,
         )
@@ -563,8 +566,8 @@ class KbotWalkingTask(KbotStandingTask[Config], Generic[Config]):
                 scale=-0.01,
                 sensor_names=("sensor_observation_left_foot_force", "sensor_observation_right_foot_force"),
             ),
-            ksim.ActuatorForcePenalty(scale=-0.005),
-            ksim.ActionSmoothnessPenalty(scale=-0.005),
+            ksim.CtrlPenalty(scale=-0.005),
+            ksim.ActionAccelerationPenalty(scale=-0.005),
             ksim.JointVelocityPenalty(scale=-0.005),
         ]
 

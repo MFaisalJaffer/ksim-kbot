@@ -2,10 +2,18 @@
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generic, TypeVar
 
+# Use EGL for headless rendering (no DISPLAY required).
+os.environ.setdefault("MUJOCO_GL", "egl")
+
+import attrs
+from jax import numpy as _jnp
+from jax._src.random import normal as _jax_normal
+import jax.scipy.stats as _jsp_stats
 import distrax
 import equinox as eqx
 import jax
@@ -24,6 +32,60 @@ from ksim_kbot import common, rewards
 
 logger = logging.getLogger(__name__)
 
+# Patch ksim.viewer: MuJoCo 3.8.0 moved GLContext to mujoco.GLContext;
+# the module attribute mujoco.gl_context no longer exists.
+import types as _types
+import sys as _sys
+if not hasattr(mujoco, "gl_context"):
+    _gl_mod = _types.ModuleType("mujoco.gl_context")
+    _gl_mod.GLContext = mujoco.GLContext
+    mujoco.gl_context = _gl_mod
+
+# Patch MjxEngine.reset: MuJoCo 3.8.0 removed 'cacc' from mjx.Data but
+# ksim 0.1.2 still tries to zero it out on reset.
+def _patched_mjx_reset(
+    self: ksim.MjxEngine,
+    physics_model: mjx.Model,
+    curriculum_level: Array,
+    rng: PRNGKeyArray,
+) -> ksim.PhysicsState:
+    from ksim.engine import StatefulActuators
+    mjx_data = mjx.make_data(physics_model)
+    for reset in self.resets:
+        rng, reset_rng = jax.random.split(rng)
+        mjx_data = reset(mjx_data, curriculum_level, reset_rng)
+    mjx_data = mjx.forward(physics_model, mjx_data)
+    replace_fields: dict = {
+        "qvel": jnp.zeros_like(mjx_data.qvel),
+        "qacc": jnp.zeros_like(mjx_data.qacc),
+        "cvel": jnp.zeros_like(mjx_data.cvel),
+    }
+    mjx_data = mjx_data.replace(**replace_fields)
+    default_action = self.actuators.get_default_action(mjx_data)
+    actuator_state = (
+        self.actuators.get_initial_state(mjx_data, rng)
+        if isinstance(self.actuators, StatefulActuators)
+        else None
+    )
+    rng, latency_rng = jax.random.split(rng)
+    return ksim.PhysicsState(
+        data=mjx_data,
+        most_recent_action=default_action,
+        event_states=self._reset_events(rng),
+        actuator_state=actuator_state,
+        action_latency=(
+            jax.random.uniform(
+                latency_rng,
+                minval=self.min_action_latency_step * curriculum_level,
+                maxval=self.max_action_latency_step * curriculum_level,
+            )
+            .round()
+            .astype(int)
+        ),
+    )
+
+ksim.MjxEngine.reset = xax.jit(static_argnames=["self"])(_patched_mjx_reset)
+
 OBS_SIZE = 20 * 2 + 2 + 3 + 3 + 3 + 40  # = position + velocity + imu_acc + imu_gyro + projected_gravity + last_action
 CMD_SIZE = 3
 NUM_OUTPUTS = 20 * 2  # position + velocity
@@ -35,10 +97,10 @@ HISTORY_LENGTH = 0
 NUM_INPUTS = (OBS_SIZE + CMD_SIZE) + SINGLE_STEP_HISTORY_SIZE * HISTORY_LENGTH
 
 MAX_TORQUE = {
-    "00": 1.0,
-    "02": 14.0,
-    "03": 40.0,
-    "04": 60.0,
+    "00": 5.0,
+    "02": 11.0,
+    "03": 11.0,
+    "04": 22.0,
 }
 
 Config = TypeVar("Config", bound="KbotStandingTaskConfig")
@@ -199,6 +261,36 @@ class KbotModel(eqx.Module):
         self.critic = KbotCritic(key)
 
 
+# Custom command classes — FloatVectorCommand derives its key name from the
+# class name via camelcase_to_snakecase, so these produce keys like
+# "linear_velocity_command_x", "linear_velocity_command_y", etc.
+
+@attrs.define(frozen=True, kw_only=True)
+class LinearVelocityCommandX(ksim.FloatVectorCommand):
+    pass
+
+
+@attrs.define(frozen=True, kw_only=True)
+class LinearVelocityCommandY(ksim.FloatVectorCommand):
+    pass
+
+
+@attrs.define(frozen=True, kw_only=True)
+class AngularVelocityCommandZ(ksim.FloatVectorCommand):
+    pass
+
+
+@attrs.define(frozen=True, kw_only=True)
+class StandingPhaseObservation(ksim.Observation):
+    """Returns a constant 2-element phase for a standing-still policy."""
+
+    def observe(self, state: ksim.ObservationInput, curriculum_level: Array, rng: PRNGKeyArray) -> Array:
+        return jnp.array([1.0, 0.0])
+
+    def get_name(self) -> str:
+        return "timestep_phase_observation"
+
+
 @dataclass
 class KbotStandingTaskConfig(ksim.PPOConfig):
     """Config for the KBot standing task."""
@@ -271,6 +363,24 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
 
         return optimizer
 
+    def get_engine(
+        self,
+        physics_model: ksim.PhysicsModel,
+        metadata: ksim.Metadata | None = None,
+    ) -> ksim.PhysicsEngine:
+        engine = super().get_engine(physics_model, metadata)
+        # PhysicsEngine stores resets/events as list, which is unhashable.
+        # Reconstruct with tuples so equinox can hash the engine as a jit static arg.
+        return type(engine)(
+            resets=tuple(engine.resets),
+            events=tuple(engine.events),
+            actuators=engine.actuators,
+            min_action_latency_step=engine.min_action_latency_step,
+            max_action_latency_step=engine.max_action_latency_step,
+            phys_steps_per_ctrl_steps=engine.phys_steps_per_ctrl_steps,
+            drop_action_prob=engine.drop_action_prob,
+        )
+
     def get_mujoco_model(self) -> mujoco.MjModel:
         mjcf_path = (Path(self.config.robot_urdf_path) / "robot.mjcf").resolve().as_posix()
         logger.info("Loading MJCF model from %s", mjcf_path)
@@ -285,16 +395,13 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
 
         return mj_model
 
-    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> dict[str, JointMetadataOutput]:
-        metadata = asyncio.run(ksim.get_mujoco_model_metadata(self.config.robot_urdf_path, cache=False))
-        if metadata.joint_name_to_metadata is None:
-            raise ValueError("Joint metadata is not available")
-        return metadata.joint_name_to_metadata
+    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> ksim.Metadata:
+        return asyncio.run(ksim.get_mujoco_model_metadata(self.config.robot_urdf_path, cache=False))
 
     def get_actuators(
         self,
         physics_model: ksim.PhysicsModel,
-        metadata: dict[str, JointMetadataOutput] | None = None,
+        metadata: ksim.Metadata | None = None,
     ) -> ksim.Actuators:
         if self.config.use_mit_actuators:
             if metadata is None:
@@ -334,36 +441,36 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
                 vel_action_noise_type="gaussian",
                 ctrl_clip=[
                     # right arm
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["02"],
-                    MAX_TORQUE["02"],
-                    MAX_TORQUE["00"],
+                    MAX_TORQUE["04"],  # shoulder_pitch (22 Nm)
+                    MAX_TORQUE["04"],  # shoulder_roll (22 Nm)
+                    MAX_TORQUE["03"],  # shoulder_yaw
+                    MAX_TORQUE["04"],  # elbow (22 Nm)
+                    MAX_TORQUE["00"],  # wrist
                     # left arm
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["02"],
-                    MAX_TORQUE["02"],
-                    MAX_TORQUE["00"],
+                    MAX_TORQUE["04"],  # shoulder_pitch (22 Nm)
+                    MAX_TORQUE["04"],  # shoulder_roll (22 Nm)
+                    MAX_TORQUE["03"],  # shoulder_yaw
+                    MAX_TORQUE["04"],  # elbow (22 Nm)
+                    MAX_TORQUE["00"],  # wrist
                     # right leg
-                    MAX_TORQUE["04"],
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["04"],
-                    MAX_TORQUE["02"],
+                    MAX_TORQUE["04"],  # hip_pitch
+                    MAX_TORQUE["04"],  # hip_roll (22 Nm)
+                    MAX_TORQUE["03"],  # hip_yaw
+                    MAX_TORQUE["04"],  # knee
+                    MAX_TORQUE["02"],  # ankle
                     # left leg
-                    MAX_TORQUE["04"],
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["03"],
-                    MAX_TORQUE["04"],
-                    MAX_TORQUE["02"],
+                    MAX_TORQUE["04"],  # hip_pitch
+                    MAX_TORQUE["04"],  # hip_roll (22 Nm)
+                    MAX_TORQUE["03"],  # hip_yaw
+                    MAX_TORQUE["04"],  # knee
+                    MAX_TORQUE["02"],  # ankle
                 ],
                 action_scale=self.config.action_scale,
             )
         else:
             return ksim.TorqueActuators()
 
-    def get_randomization(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
+    def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
         if self.config.domain_randomize:
             return [
                 ksim.StaticFrictionRandomizer(scale_lower=0.5, scale_upper=2.0),
@@ -385,7 +492,7 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
                 default_targets=(
                     0.0,
                     0.0,
-                    0.9,
+                    1.012,
                     # quat
                     1.0,
                     0.0,
@@ -460,7 +567,7 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
             base_angular_velocity_noise = 0.0
             base_angular_velocity_noise = 0.0
         return [
-            common.TimestepPhaseObservation(),
+            StandingPhaseObservation(),
             common.JointPositionObservation(
                 default_targets=(
                     # right arm
@@ -510,16 +617,13 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
             ksim.BaseLinearVelocityObservation(noise=base_linear_velocity_noise),
             ksim.BaseAngularVelocityObservation(noise=base_angular_velocity_noise),
             ksim.CenterOfMassVelocityObservation(),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="local_linvel_origin", noise=0.0),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="global_linvel_origin", noise=0.0),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="global_angvel_origin", noise=0.0),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="upvector_origin", noise=0.0),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="orientation_origin", noise=0.0),
-            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="gyro_origin", noise=0.0),
+            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="base_site_linvel", noise=0.0),
+            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="base_site_angvel", noise=0.0),
+            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="base_site_quat", noise=0.0),
             common.FeetContactObservation.create(
                 physics_model=physics_model,
-                foot_left_geom_names="KB_D_501L_L_LEG_FOOT_collision_box",
-                foot_right_geom_names="KB_D_501R_R_LEG_FOOT_collision_box",
+                foot_left_geom_names=["KB_D_501L_L_LEG_FOOT_collision_capsule_0", "KB_D_501L_L_LEG_FOOT_collision_capsule_1"],
+                foot_right_geom_names=["KB_D_501R_R_LEG_FOOT_collision_capsule_0", "KB_D_501R_R_LEG_FOOT_collision_capsule_1"],
                 floor_geom_names="floor",
             ),
             common.FeetPositionObservation.create(
@@ -532,17 +636,16 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
         ]
 
     def get_commands(self, physics_model: ksim.PhysicsModel) -> list[ksim.Command]:
-        switch_prob = 0.0
         return [
-            ksim.LinearVelocityCommand(index="x", range=(0.0, 0.0), zero_prob=1.0, switch_prob=switch_prob),  # type: ignore[attr-defined]
-            ksim.LinearVelocityCommand(index="y", range=(0.0, 0.0), zero_prob=1.0, switch_prob=switch_prob),  # type: ignore[attr-defined]
-            ksim.AngularVelocityCommand(index="z", scale=0.0, zero_prob=1.0, switch_prob=switch_prob),  # type: ignore[attr-defined]
+            LinearVelocityCommandX(ranges=((0.0, 0.0),), switch_prob=0.0),
+            LinearVelocityCommandY(ranges=((0.0, 0.0),), switch_prob=0.0),
+            AngularVelocityCommandZ(ranges=((0.0, 0.0),), switch_prob=0.0),
         ]
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
             rewards.XYPositionPenalty(target_x=0.0, target_y=0.0, scale=-0.1),
-            ksim.ActionSmoothnessPenalty(scale=-0.001),
+            ksim.ActionAccelerationPenalty(scale=-0.001),
             rewards.JointDeviationPenalty(
                 scale=-0.02,
                 joint_targets=(
@@ -599,19 +702,19 @@ class KbotStandingTask(ksim.PPOTask[KbotStandingTaskConfig], Generic[Config]):
                 ),
             ),
             rewards.FeetSlipPenalty(scale=-0.05),
-            ksim.StayAliveReward(scale=1.0),
+            ksim.StayAliveReward(scale=5.0),
             # common.TerminationPenalty(scale=-5.0),
         ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
-            common.GVecTermination.create(physics_model, sensor_name="upvector_origin"),
+            ksim.NotUprightTermination(max_radians=1.4),  # ~80 degrees tilt
         ]
 
     def get_model(self, key: PRNGKeyArray) -> KbotModel:
         return KbotModel(key)
 
-    def get_initial_carry(self, rng: PRNGKeyArray) -> tuple[Array, Array]:
+    def get_initial_model_carry(self, rng: PRNGKeyArray) -> tuple[Array, Array]:
         return (
             jnp.zeros(HISTORY_LENGTH * SINGLE_STEP_HISTORY_SIZE),
             jnp.zeros(HISTORY_LENGTH * SINGLE_STEP_HISTORY_SIZE),
@@ -788,7 +891,9 @@ if __name__ == "__main__":
             # Simulation parameters.
             dt=0.002,
             ctrl_dt=0.02,
-            max_action_latency=0.0,
+            iterations=6,
+            ls_iterations=6,
+            action_latency_range=(0.0, 0.0),
             rollout_length_seconds=1.25,
             # PPO parameters
             action_scale=0.5,

@@ -1,6 +1,10 @@
 # mypy: disable-error-code="override"
 """Defines simple task for training a walking policy for the default humanoid using an RNN actor."""
 
+import os
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,12 +20,17 @@ import xax
 from jaxtyping import Array, PRNGKeyArray
 from mujoco import mjx
 from mujoco_scenes.mjcf import load_mjmodel
-from xax.nn.export import export
+try:
+    from xax.nn.export import export
+except ModuleNotFoundError:
+    export = None  # type: ignore[assignment]
 
+from ksim_kbot import rewards as kbot_rewards
 from ksim_kbot.walking.walking_joystick import (
     NUM_CRITIC_INPUTS,
     NUM_INPUTS,
     NUM_OUTPUTS,
+    JOINT_TARGETS,
     KbotWalkingTask,
     KbotWalkingTaskConfig,
 )
@@ -109,7 +118,7 @@ class KbotRNNActor(eqx.Module):
         gait_freq_cmd: Array,
         last_action_n: Array,
         carry: Array,
-    ) -> tuple[distrax.Distribution, Array]:
+    ) -> tuple[distrax.Normal, Array]:
         obs_n = jnp.concatenate(
             [
                 timestep_phase_4,  # 1
@@ -128,7 +137,7 @@ class KbotRNNActor(eqx.Module):
 
         return self.call_flat_obs(obs_n, carry)
 
-    def call_flat_obs(self, obs_n: Array, carry: Array) -> tuple[distrax.Distribution, Array]:
+    def call_flat_obs(self, obs_n: Array, carry: Array) -> tuple[distrax.Normal, Array]:
         x_n = self.input_proj(obs_n)
         out_carries = []
         for i, rnn in enumerate(self.rnns):
@@ -294,8 +303,12 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             depth=self.config.depth,
         )
 
+    def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> ksim.Metadata:
+        import asyncio
+        return asyncio.run(ksim.get_mujoco_model_metadata("/home/faisal/.kscale/robots/kbot/robot/", cache=False))
+
     def get_mujoco_model(self) -> mujoco.MjModel:
-        mjcf_path = (Path(self.config.robot_urdf_path) / "robot_arms.mjcf").resolve().as_posix()
+        mjcf_path = "/home/faisal/.kscale/robots/kbot/robot/robot.mjcf"
         logger.info("Loading MJCF model from %s", mjcf_path)
 
         mj_model = load_mjmodel(mjcf_path, scene=self.config.terrain_type)
@@ -315,7 +328,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
         observations: xax.FrozenDict[str, Array],
         commands: xax.FrozenDict[str, Array],
         carry: Array,
-    ) -> tuple[distrax.Distribution, Array]:
+    ) -> tuple[distrax.Normal, Array]:
         timestep_phase_4 = observations["timestep_phase_observation"]
         joint_pos_n = observations["joint_position_observation"]
         joint_vel_n = observations["joint_velocity_observation"]
@@ -392,8 +405,201 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             carry=carry,
         )
 
+    def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
+        return [
+            # JointDeviationPenalty: re-added as a stability anchor.
+            # Knees AND ankles are unconstrained (weight 0.01 = effectively zero) so
+            # the policy is free to bend knees and articulate ankles for push-off.
+            # Hip pitch is also free. Arms and hip roll/yaw are constrained to keep
+            # the upper body stable while legs do the walking.
+            kbot_rewards.JointDeviationPenalty(
+                scale=-0.1,
+                joint_targets=JOINT_TARGETS,
+                joint_weights=(
+                    # right arm
+                    1.2, 1.0, 1.0, 1.0, 1.0,
+                    # left arm
+                    1.2, 1.0, 1.0, 1.0, 1.0,
+                    # right leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
+                    0.01, 1.0, 1.0, 0.01, 0.01,  # ankle now free (was 1.0)
+                    # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
+                    0.01, 1.0, 1.0, 0.01, 0.01,  # ankle now free (was 1.0)
+                ),
+            ),
+            kbot_rewards.HipDeviationPenalty.create(
+                physics_model=physics_model,
+                hip_names=(
+                    "dof_right_hip_roll_03",
+                    "dof_right_hip_yaw_03",
+                    "dof_left_hip_roll_03",
+                    "dof_left_hip_yaw_03",
+                ),
+                joint_targets=JOINT_TARGETS,
+                scale=-0.10,  # was -0.25 — kept relaxed to allow some hip motion
+            ),
+            kbot_rewards.TerminationPenalty(scale=-1.0),
+            kbot_rewards.OrientationPenalty(scale=-2.0),
+            kbot_rewards.LinearVelocityTrackingReward(
+                scale=1.0,
+                linvel_obs_name="base_linear_velocity_observation",
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            kbot_rewards.AngularVelocityTrackingReward(
+                scale=0.5,
+                angvel_obs_name="base_angular_velocity_observation",
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            kbot_rewards.AngularVelocityXYPenalty(
+                scale=-0.15,
+                angvel_obs_name="base_angular_velocity_observation",
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            # Restored to scale 2.1 (was the working run_27 value), translation_gated
+            # kept on so policy doesn't get free reward by marching in place.
+            kbot_rewards.FeetPhaseReward(
+                foot_default_height=0.04,
+                max_foot_height=0.12,
+                scale=2.1,
+                stand_still_threshold=self.config.stand_still_threshold,
+                translation_gated=True,
+                translation_gate_sensitivity=0.25,
+                linvel_obs_name="base_linear_velocity_observation",
+            ),
+            kbot_rewards.FeetSlipPenalty(scale=-0.25),
+            # Restored to scale 50.0 — strong pull toward stable JOINT_TARGETS pose
+            # when joystick idle. Critical anchor that was missing in run_34.
+            kbot_rewards.StandStillReward(
+                scale=50.0,
+                linear_velocity_cmd_name="linear_velocity_command",
+                angular_velocity_cmd_name="angular_velocity_command",
+                joint_targets=JOINT_TARGETS,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            kbot_rewards.JointPositionLimitPenalty.create(
+                physics_model=physics_model,
+                soft_limit_factor=0.95,
+                scale=-1.0,
+            ),
+            kbot_rewards.ContactForcePenalty(
+                scale=-0.01,
+                sensor_names=("sensor_observation_left_foot_force", "sensor_observation_right_foot_force"),
+            ),
+            ksim.CtrlPenalty(scale=-0.005),
+            ksim.ActionAccelerationPenalty(scale=-0.005),
+            ksim.JointVelocityPenalty(scale=-0.005),
+            kbot_rewards.KneeRangeOfMotion.create(
+                physics_model=physics_model,
+                knee_names=("dof_left_knee_04", "dof_right_knee_04"),
+            ),
+            # Restored to run_27 settings: scale 0.5, grace 0.2s
+            kbot_rewards.SingleFootContactReward(
+                scale=0.5,
+                ctrl_dt=self.config.ctrl_dt,
+                grace_period=0.2,
+            ),
+            # Reduced from -0.5 to -0.1 — less aggressive flying penalty.
+            kbot_rewards.NoContactPenalty(scale=-0.1),
+            # FeetAirtimeReward removed — was actively penalizing the policy for
+            # exploring leg motion (airtimes < 0.4s gave net-negative reward).
+            # MarchInPlacePenalty kept (low cost, still helpful).
+            kbot_rewards.MarchInPlacePenalty(
+                scale=-2.0,
+                foot_default_height=0.04,
+                velocity_match_sensitivity=0.25,
+                linvel_obs_name="base_linear_velocity_observation",
+            ),
+        ]
+
+    def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
+        if self.config.domain_randomize:
+            vel_obs_noise = 1.8
+            imu_acc_noise = 0.4
+            imu_gyro_noise = 0.4
+            local_gvec_noise = 0.05
+            base_position_noise = 0.0
+            base_orientation_noise = 0.0
+            base_linear_velocity_noise = 0.0
+            base_angular_velocity_noise = 0.0
+        else:
+            vel_obs_noise = 0.0
+            imu_acc_noise = 0.0
+            imu_gyro_noise = 0.0
+            local_gvec_noise = 0.0
+            base_position_noise = 0.0
+            base_orientation_noise = 0.0
+            base_linear_velocity_noise = 0.0
+            base_angular_velocity_noise = 0.0
+
+        from ksim_kbot.walking.walking_joystick import JOINT_TARGETS
+        from ksim_kbot.common import (
+            TimestepPhaseObservation,
+            JointPositionObservation,
+            LocalProjectedGravityObservation,
+            LastActionObservation,
+            FeetContactObservation,
+            FeetPositionObservation,
+            TrueHeightObservation,
+        )
+
+        return [
+            TimestepPhaseObservation(),
+            JointPositionObservation(default_targets=JOINT_TARGETS, noise=0.05),
+            ksim.JointVelocityObservation(noise=vel_obs_noise),
+            ksim.ActuatorForceObservation(),
+            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="imu_acc", noise=imu_acc_noise),
+            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="imu_gyro", noise=imu_gyro_noise),
+            ksim.ProjectedGravityObservation.create(
+                physics_model=physics_model,
+                framequat_name="base_site_quat",
+                lag_range=(0.0, 0.1),
+                noise=local_gvec_noise,
+            ),
+            LocalProjectedGravityObservation.create(
+                physics_model=physics_model, sensor_name="base_site_quat", noise=local_gvec_noise
+            ),
+            LastActionObservation(noise=0.0),
+            # Additional critic observations
+            ksim.BasePositionObservation(noise=base_position_noise),
+            ksim.BaseOrientationObservation(noise=base_orientation_noise),
+            ksim.BaseLinearVelocityObservation(noise=base_linear_velocity_noise),
+            ksim.BaseAngularVelocityObservation(noise=base_angular_velocity_noise),
+            ksim.CenterOfMassVelocityObservation(),
+            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="left_foot_force", noise=0.0),
+            ksim.SensorObservation.create(physics_model=physics_model, sensor_name="right_foot_force", noise=0.0),
+            FeetContactObservation.create(
+                physics_model=physics_model,
+                foot_left_geom_names="KB_D_501L_L_LEG_FOOT_collision_capsule_0",
+                foot_right_geom_names="KB_D_501R_R_LEG_FOOT_collision_capsule_0",
+                floor_geom_names="floor",
+            ),
+            FeetPositionObservation.create(
+                physics_model=physics_model,
+                foot_left_site_name="left_foot",
+                foot_right_site_name="right_foot",
+                floor_threshold=0.00,
+            ),
+            TrueHeightObservation(),
+        ]
+
+    def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
+        return [ksim.NotUprightTermination(max_radians=1.4)]  # 80°: gentle to let cold-init policy survive long enough to learn. Tighten to ~0.8 once episode_length > 100s.
+
+    # Pushes inherit from parent (walking_joystick.py): XYPushEvent (0-1.8) and
+    # TorquePushEvent (0-1.8) every 2-4s. Strength is auto-scaled by curriculum_level,
+    # so at level=0 pushes are zero, ramping up as the policy improves.
+
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
-        return ksim.ConstantCurriculum(level=0.1)
+        # Auto-pacing curriculum with hysteresis to prevent thrashing.
+        # - num_levels=20 → 0.05 increments (smaller jumps when bumping)
+        # - increase_threshold=120s → must sustain 2-min episodes before bumping up
+        # - decrease_threshold=10s → only drop if episodes truly collapse
+        # The wide gap between increase/decrease thresholds creates a stable dead-zone
+        # so the policy can converge at each level instead of oscillating.
+        return ksim.EpisodeLengthCurriculum(
+            num_levels=20,
+            increase_threshold=120.0,
+            decrease_threshold=10.0,
+        )
 
     def get_ppo_variables(
         self,
@@ -522,11 +728,8 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             else ckpt_path.parent / f"tf_model_{state.num_steps}"
         )
 
-        export(
-            model_fn,
-            input_shapes,
-            tf_path,
-        )
+        if export is not None:
+            export(model_fn, input_shapes, tf_path)
 
         return state
 
@@ -538,18 +741,17 @@ if __name__ == "__main__":
     #   python -m ksim_kbot.walking.walking_joystick_rnn run_model_viewer=True
     KbotWalkingJoystickRNNTask.launch(
         KbotWalkingJoystickRNNTaskConfig(
-            num_envs=4096,
-            batch_size=256,
-            num_passes=10,
+            num_envs=3072,
+            batch_size=192,
+            num_passes=4,
             epochs_per_log_step=1,
             # Simulation parameters.
-            iterations=8,
-            ls_iterations=8,
+            iterations=6,
+            ls_iterations=6,
             dt=0.002,
             ctrl_dt=0.02,
-            max_action_latency=0.005,
-            rollout_length_seconds=10.0,
-            render_length_seconds=10.0,
+            action_latency_range=(0.0, 0.005),
+            rollout_length_seconds=5.0,
             # PPO parameters
             action_scale=1.0,
             gamma=0.97,
@@ -557,11 +759,11 @@ if __name__ == "__main__":
             entropy_coef=0.005,
             learning_rate=1e-4,
             clip_param=0.3,
-            max_grad_norm=0.5,
+            max_grad_norm=0.3,
             valid_every_n_steps=25,
             save_every_n_steps=25,
-            export_for_inference=True,
-            only_save_most_recent=False,
+            export_for_inference=False,
+            only_save_most_recent=True,
             # Task parameters
             domain_randomize=True,
             gait_freq_lower=1.25,
