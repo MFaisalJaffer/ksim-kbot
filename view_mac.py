@@ -39,15 +39,33 @@ def run_viewer_with_policy(ckpt_path: str) -> None:
         load_from_ckpt_path=ckpt_path,
         disable_multiprocessing=True,
         viewer_argmax_action=True,
-        # Required fields (must match training values)
+        # Match training config exactly
         num_envs=1,
         batch_size=1,
-        num_passes=1,
-        rollout_length_seconds=5.0,
-        dt=0.002,
-        ctrl_dt=0.02,
+        num_passes=4,
+        epochs_per_log_step=1,
         iterations=6,
         ls_iterations=6,
+        dt=0.002,
+        ctrl_dt=0.02,
+        action_latency_range=(0.0, 0.005),
+        rollout_length_seconds=5.0,
+        action_scale=1.0,
+        gamma=0.97,
+        lam=0.95,
+        entropy_coef=0.005,
+        learning_rate=1e-4,
+        clip_param=0.3,
+        max_grad_norm=0.3,
+        valid_every_n_steps=25,
+        save_every_n_steps=25,
+        export_for_inference=False,
+        only_save_most_recent=True,
+        domain_randomize=False,  # disable randomization for clean viewing
+        gait_freq_lower=1.25,
+        gait_freq_upper=1.5,
+        reward_clip_min=0.0,
+        reward_clip_max=1000.0,
     )
     task = KbotWalkingJoystickRNNTask(cfg)
 
