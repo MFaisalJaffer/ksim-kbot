@@ -18,6 +18,7 @@ from pathlib import Path
 import mujoco
 import mujoco.viewer
 import numpy as np
+from mujoco_scenes.mjcf import load_mjmodel
 
 # ── robot config ─────────────────────────────────────────────────────────────
 MJCF_PATH = str(Path.home() / ".kscale/robots/kbot/robot/robot.mjcf")
@@ -61,7 +62,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading model from {MJCF_PATH}")
-    model = mujoco.MjModel.from_xml_path(MJCF_PATH)
+    model = load_mjmodel(MJCF_PATH, scene="smooth")
     data = mujoco.MjData(model)
 
     # Reset to default joint targets
