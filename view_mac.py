@@ -85,6 +85,9 @@ import ksim  # noqa: E402  (import after env vars)
 class KeyboardLinearVelocityCommand(ksim.Command):
     """Linear velocity command driven by keyboard state."""
 
+    def get_name(self) -> str:
+        return "linear_velocity_command"  # must match what the policy observes
+
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
     ) -> Array:
@@ -103,6 +106,9 @@ class KeyboardLinearVelocityCommand(ksim.Command):
 @attrs.define(frozen=True, kw_only=True)
 class KeyboardAngularVelocityCommand(ksim.Command):
     """Angular velocity command driven by keyboard state."""
+
+    def get_name(self) -> str:
+        return "angular_velocity_command"  # must match what the policy observes
 
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
