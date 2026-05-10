@@ -31,8 +31,10 @@ def run_viewer_with_policy(ckpt_path: str) -> None:
     # Import after env vars are set
     from ksim_kbot.walking.walking_joystick_rnn import KbotWalkingJoystickRNNTask
 
+    from ksim_kbot.walking.walking_joystick_rnn import KbotWalkingJoystickRNNTaskConfig
+
     # Build config — run_mode=view disables training-specific setup
-    cfg = KbotWalkingJoystickRNNTask.get_config(
+    cfg = KbotWalkingJoystickRNNTaskConfig(
         run_mode="view",
         load_from_ckpt_path=ckpt_path,
         disable_multiprocessing=True,
