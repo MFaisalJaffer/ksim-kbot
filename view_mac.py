@@ -1,10 +1,11 @@
 """Standalone macOS-compatible policy viewer using mujoco.viewer.launch_passive.
 
 Usage:
-    mjpython view_mac.py --ckpt /path/to/ckpt.bin [--no-policy]
+    mjpython view_mac.py --ckpt /path/to/ckpt.bin
 
 Uses mujoco.viewer.launch_passive which is designed for mjpython on macOS,
 bypassing ksim's GlfwMujocoViewer which crashes due to macOS thread restrictions.
+The full policy (RNN + observations + rewards) runs via ksim's step_engine.
 """
 
 import os
@@ -12,88 +13,136 @@ os.environ.setdefault("MUJOCO_GL", "glfw")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import argparse
+import itertools
+import logging
 import time
 from pathlib import Path
 
+import jax
 import mujoco
 import mujoco.viewer
 import numpy as np
-from mujoco_scenes.mjcf import load_mjmodel
 
-# ── robot config ─────────────────────────────────────────────────────────────
-MJCF_PATH = str(Path.home() / ".kscale/robots/kbot/robot/robot.mjcf")
-
-# Default joint targets (from walking_joystick.py)
-JOINT_TARGETS = np.array([
-    # right arm
-    0.0, 0.0, 0.0, 1.4, 0.0,
-    # left arm
-    0.0, 0.0, 0.0, -1.4, 0.0,
-    # right leg
-    -0.23, 0.0, 0.0, -0.873, 0.195,
-    # left leg
-    0.23, 0.0, 0.0, 0.873, -0.195,
-])
-
-# PD gains (approximate — tune if robot oscillates)
-KP = 80.0
-KD = 4.0
+logger = logging.getLogger(__name__)
 
 
-def pd_control(model, data, targets):
-    """Apply PD control to hold joints at targets."""
-    qpos = data.qpos[7:]          # skip freejoint (pos + quat)
-    qvel = data.qvel[6:]          # skip freejoint vel
-    n = min(len(targets), len(qpos), model.nu)
-    data.ctrl[:n] = KP * (targets[:n] - qpos[:n]) - KD * qvel[:n]
-    # Clip to actuator limits
-    ctrl_range = model.actuator_ctrlrange
-    if ctrl_range is not None and len(ctrl_range) >= n:
-        data.ctrl[:n] = np.clip(
-            data.ctrl[:n], ctrl_range[:n, 0], ctrl_range[:n, 1]
+def run_viewer_with_policy(ckpt_path: str) -> None:
+    """Mirror of ksim's run_model_viewer but using mujoco.viewer.launch_passive."""
+    # Import after env vars are set
+    from ksim_kbot.walking.walking_joystick_rnn import KbotWalkingJoystickRNNTask
+
+    # Build config — run_mode=view disables training-specific setup
+    cfg = KbotWalkingJoystickRNNTask.get_config(
+        run_mode="view",
+        load_from_ckpt_path=ckpt_path,
+        disable_multiprocessing=True,
+        viewer_argmax_action=True,
+    )
+    task = KbotWalkingJoystickRNNTask(cfg)
+
+    with task, jax.disable_jit():
+        rng = task.prng_key()
+        task.set_loggers()
+
+        # Load MuJoCo model (with scene/ground)
+        mj_model = task.get_mujoco_model()
+        mj_model = task.set_mujoco_model_opts(mj_model)
+        metadata = task.get_mujoco_model_metadata(mj_model)
+        randomizers = task.get_physics_randomizers(mj_model)
+
+        # Load policy checkpoint
+        rng, model_rng = jax.random.split(rng)
+        models, _ = task.load_initial_state(model_rng, load_optimizer=False)
+
+        import equinox as eqx
+        model_arrs, model_statics = (
+            tuple(ms)
+            for ms in zip(
+                *(eqx.partition(m, task.model_partition_fn) for m in models),
+                strict=True,
+            )
         )
+
+        # Set up ksim constants (commands, observations, rewards config)
+        constants = task._get_constants(
+            mj_model=mj_model,
+            physics_model=mj_model,
+            model_statics=model_statics,
+            argmax_action=cfg.viewer_argmax_action,
+        )
+
+        # Set up initial environment state (physics + RNN hidden state)
+        env_states = task._get_env_state(
+            rng=rng,
+            rollout_constants=constants,
+            mj_model=mj_model,
+            physics_model=mj_model,
+            randomizers=randomizers,
+        )
+
+        shared_state = task._get_shared_state(
+            mj_model=mj_model,
+            physics_model=mj_model,
+            model_arrs=model_arrs,
+        )
+
+        # Create a CPU-side MjData for the viewer (policy runs on JAX/MJX side)
+        mj_data = mujoco.MjData(mj_model)
+        mj_data.qpos[:] = np.array(env_states.physics_state.data.qpos)
+        mj_data.qvel[:] = np.array(env_states.physics_state.data.qvel)
+        mujoco.mj_forward(mj_model, mj_data)
+
+        print("Launching viewer — policy running from checkpoint")
+        print("Close window or Ctrl-C to quit")
+
+        with mujoco.viewer.launch_passive(mj_model, mj_data) as v:
+            v.cam.distance = 3.5
+            v.cam.elevation = -15
+            v.cam.azimuth = 135
+
+            for _ in itertools.count():
+                if not v.is_running():
+                    break
+
+                step_start = time.time()
+
+                # Run one step: policy inference + physics
+                transition, env_states = task.step_engine(
+                    constants=constants,
+                    env_states=env_states,
+                    shared_state=shared_state,
+                )
+
+                # Copy JAX physics state → CPU viewer data
+                mj_data.qpos[:] = np.array(env_states.physics_state.data.qpos)
+                mj_data.qvel[:] = np.array(env_states.physics_state.data.qvel)
+                mujoco.mj_forward(mj_model, mj_data)
+                v.sync()
+
+                # Pace to ctrl_dt
+                elapsed = time.time() - step_start
+                remaining = cfg.ctrl_dt - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", default=None, help="Path to ckpt.bin")
-    parser.add_argument("--no-policy", action="store_true",
-                        help="Skip policy — just hold default pose")
+    parser = argparse.ArgumentParser(description="macOS policy viewer for K-Bot")
+    parser.add_argument(
+        "--ckpt",
+        default=str(Path.home() / "kbot/ckpt.bin"),
+        help="Path to checkpoint .bin file",
+    )
     args = parser.parse_args()
 
-    print(f"Loading model from {MJCF_PATH}")
-    model = load_mjmodel(MJCF_PATH, scene="smooth")
-    data = mujoco.MjData(model)
+    ckpt = Path(args.ckpt)
+    if not ckpt.exists():
+        print(f"ERROR: checkpoint not found at {ckpt}")
+        print("Run: scp faisal@192.168.68.130:/path/to/ckpt.bin ~/kbot/ckpt.bin")
+        return
 
-    # Reset to default joint targets
-    n = min(len(JOINT_TARGETS), model.nq - 7)
-    data.qpos[7:7 + n] = JOINT_TARGETS[:n]
-    data.qpos[2] = 0.98        # set height so feet are near ground
-    mujoco.mj_forward(model, data)
-
-    print("Launching viewer — close window or press ESC to quit")
-    print("Robot is held at default standing pose via PD control")
-    if args.ckpt and not args.no_policy:
-        print("(Full policy inference not yet wired — showing default pose)")
-
-    with mujoco.viewer.launch_passive(model, data) as v:
-        v.cam.distance = 3.5
-        v.cam.elevation = -15
-        v.cam.azimuth = 135
-
-        while v.is_running():
-            step_start = time.time()
-
-            # Hold default pose with PD control
-            pd_control(model, data, JOINT_TARGETS)
-            mujoco.mj_step(model, data)
-            v.sync()
-
-            # ~200 Hz simulation
-            elapsed = time.time() - step_start
-            remaining = 0.005 - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
+    print(f"Loading checkpoint: {ckpt}")
+    run_viewer_with_policy(str(ckpt))
 
 
 if __name__ == "__main__":
