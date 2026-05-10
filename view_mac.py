@@ -39,6 +39,13 @@ def run_viewer_with_policy(ckpt_path: str) -> None:
         load_from_ckpt_path=ckpt_path,
         disable_multiprocessing=True,
         viewer_argmax_action=True,
+        # Required training fields (unused in view mode but must be valid)
+        num_envs=1,
+        batch_size=1,
+        num_passes=1,
+        rollout_length_seconds=5.0,
+        dt=0.002,
+        ctrl_dt=0.02,
     )
     task = KbotWalkingJoystickRNNTask(cfg)
 
