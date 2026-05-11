@@ -473,7 +473,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # when joystick idle. Critical anchor that was missing in run_34.
             kbot_rewards.StandStillReward(
                 scale=50.0,
-                sensitivity=0.1,  # was 0.01 — widened basin: gives gradient even when ~close to target
+                sensitivity=0.05,  # was 0.01 → 0.1 → 0.05
                 linear_velocity_cmd_name="linear_velocity_command",
                 angular_velocity_cmd_name="angular_velocity_command",
                 joint_targets=JOINT_TARGETS,
