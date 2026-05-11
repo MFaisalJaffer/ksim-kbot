@@ -291,7 +291,7 @@ class SingleFootContactReward(ksim.StatefulReward):
 
         carry, time_since_single_contact = jax.lax.scan(_body, reward_carry, (single, is_zero_cmd))
         within_grace = time_since_single_contact < self.grace_period
-        reward = jnp.where(is_zero_cmd, 1.0, within_grace[:, 0])
+        reward = jnp.where(is_zero_cmd, 0.0, within_grace[:, 0])
         return reward, carry
 
 

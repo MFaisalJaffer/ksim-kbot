@@ -230,7 +230,7 @@ class KbotWalkingTaskConfig(KbotStandingTaskConfig):
     gait_freq_lower: float = xax.field(value=1.25)
     gait_freq_upper: float = xax.field(value=1.5)
 
-    stand_still_threshold: float = xax.field(value=0.0)  # no stand still reward
+    stand_still_threshold: float = xax.field(value=0.1)  # gate walking rewards off below 0.1 m/s cmd
 
     evaluate_gait: bool = xax.field(value=False)
 
@@ -462,8 +462,8 @@ class KbotWalkingTask(KbotStandingTask[Config], Generic[Config]):
                 common.LinearVelocityCommand(
                     x_range=(-0.3, 0.7),
                     y_range=(-0.2, 0.2),
-                    x_zero_prob=0.1,
-                    y_zero_prob=0.2,
+                    x_zero_prob=0.3,   # was 0.1 — more stand-still practice
+                    y_zero_prob=0.3,   # was 0.2
                     switch_prob=self.config.ctrl_dt / 3,  # once per 3 seconds
                 ),
                 common.AngularVelocityCommand(
