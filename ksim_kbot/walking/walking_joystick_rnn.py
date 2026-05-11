@@ -441,6 +441,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             kbot_rewards.OrientationPenalty(scale=-2.0),
             kbot_rewards.LinearVelocityTrackingReward(
                 scale=3.0,  # was 1.0 — increased to break standing-still local min
+                error_scale=0.5,  # was 0.25 — more lenient for bootstrapping: rewards partial tracking
                 linvel_obs_name="base_linear_velocity_observation",
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
@@ -449,10 +450,12 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 angvel_obs_name="base_angular_velocity_observation",
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
+            # stand_still_threshold=0.0 intentionally: always penalize X/Y trunk wobble,
+            # even when standing still. Gating it off at zero command lets the robot wobble freely.
             kbot_rewards.AngularVelocityXYPenalty(
                 scale=-0.15,
                 angvel_obs_name="base_angular_velocity_observation",
-                stand_still_threshold=self.config.stand_still_threshold,
+                stand_still_threshold=0.0,
             ),
             # Lowered translation_gate_sensitivity 0.25 → 0.05 to break catch-22:
             # robot now gets phase reward at 5 cm/s instead of 25 cm/s.
@@ -470,6 +473,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # when joystick idle. Critical anchor that was missing in run_34.
             kbot_rewards.StandStillReward(
                 scale=50.0,
+                sensitivity=0.1,  # was 0.01 — widened basin: gives gradient even when ~close to target
                 linear_velocity_cmd_name="linear_velocity_command",
                 angular_velocity_cmd_name="angular_velocity_command",
                 joint_targets=JOINT_TARGETS,
@@ -503,7 +507,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # exploring leg motion (airtimes < 0.4s gave net-negative reward).
             # MarchInPlacePenalty kept (low cost, still helpful).
             kbot_rewards.MarchInPlacePenalty(
-                scale=-2.0,
+                scale=-0.5,  # was -2.0 — reduced to allow early leg exploration before velocity tracking learned
                 foot_default_height=0.04,
                 velocity_match_sensitivity=0.25,
                 linvel_obs_name="base_linear_velocity_observation",
