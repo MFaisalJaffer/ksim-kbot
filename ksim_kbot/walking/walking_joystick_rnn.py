@@ -755,7 +755,7 @@ if __name__ == "__main__":
             dt=0.002,
             ctrl_dt=0.02,
             action_latency_range=(0.0, 0.005),
-            rollout_length_seconds=5.0,
+            rollout_length_seconds=2.0,  # phase 1: short rollouts for fast bootstrapping (was 5.0)
             # PPO parameters
             action_scale=1.0,
             gamma=0.97,
