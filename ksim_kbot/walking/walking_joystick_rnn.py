@@ -440,12 +440,12 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             kbot_rewards.TerminationPenalty(scale=-1.0),
             kbot_rewards.OrientationPenalty(scale=-2.0),
             kbot_rewards.LinearVelocityTrackingReward(
-                scale=1.0,
+                scale=3.0,  # was 1.0 — increased to break standing-still local min
                 linvel_obs_name="base_linear_velocity_observation",
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
             kbot_rewards.AngularVelocityTrackingReward(
-                scale=0.5,
+                scale=1.0,  # was 0.5
                 angvel_obs_name="base_angular_velocity_observation",
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
@@ -454,15 +454,15 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 angvel_obs_name="base_angular_velocity_observation",
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
-            # Restored to scale 2.1 (was the working run_27 value), translation_gated
-            # kept on so policy doesn't get free reward by marching in place.
+            # Lowered translation_gate_sensitivity 0.25 → 0.05 to break catch-22:
+            # robot now gets phase reward at 5 cm/s instead of 25 cm/s.
             kbot_rewards.FeetPhaseReward(
                 foot_default_height=0.04,
                 max_foot_height=0.12,
                 scale=2.1,
                 stand_still_threshold=self.config.stand_still_threshold,
                 translation_gated=True,
-                translation_gate_sensitivity=0.25,
+                translation_gate_sensitivity=0.05,
                 linvel_obs_name="base_linear_velocity_observation",
             ),
             kbot_rewards.FeetSlipPenalty(scale=-0.25),
