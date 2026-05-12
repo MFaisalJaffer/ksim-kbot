@@ -473,7 +473,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # when joystick idle. Critical anchor that was missing in run_34.
             kbot_rewards.StandStillReward(
                 scale=50.0,
-                sensitivity=0.05,
+                sensitivity=0.3,  # was 0.05 — wider basin lets robot shift weight to balance
                 # Orientation gate: reward drops when leaning so it doesn't fight
                 # against recovery foot steps. At ~15° lean the reward is ~10%.
                 orientation_sensitivity=0.05,
