@@ -753,7 +753,7 @@ if __name__ == "__main__":
     #   python -m ksim_kbot.walking.walking_joystick_rnn run_model_viewer=True
     KbotWalkingJoystickRNNTask.launch(
         KbotWalkingJoystickRNNTaskConfig(
-            num_envs=2048,  # 9.5GB at 1280 → scale up to use ~15GB of 16GB VRAM
+            num_envs=2304,  # 12.96GB at 2048 → push to ~15GB
             batch_size=256,
             num_passes=4,
             epochs_per_log_step=1,
