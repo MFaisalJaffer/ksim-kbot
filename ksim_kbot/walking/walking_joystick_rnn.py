@@ -589,7 +589,14 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
         ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
-        return [ksim.NotUprightTermination(max_radians=1.4)]  # 80°: gentle to let cold-init policy survive long enough to learn. Tighten to ~0.8 once episode_length > 100s.
+        return [
+            # Tightened from 1.4 rad (80°) — was so permissive the robot could lie on
+            # its back with feet up and never terminate.
+            ksim.NotUprightTermination(max_radians=0.6),  # ~34°
+            # Terminate if base drops below 0.5m (half of 1.02m standing height).
+            # Prevents the exploit of sinking underground / lying on back.
+            ksim.MinimumHeightTermination(min_height=0.5),
+        ]
 
     # Pushes inherit from parent (walking_joystick.py): XYPushEvent (0-1.8) and
     # TorquePushEvent (0-1.8) every 2-4s. Strength is auto-scaled by curriculum_level,
