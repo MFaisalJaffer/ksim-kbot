@@ -543,7 +543,13 @@ class ContactForcePenalty(ksim.Reward):
 
 @attrs.define(frozen=True, kw_only=True)
 class StandStillReward(ksim.Reward):
-    """Reward for standing still."""
+    """Reward for standing still upright at target joint pose.
+
+    Includes an orientation gate: when the robot is leaning, the reward drops
+    proportionally. This prevents the large stand-still reward from competing
+    against recovery foot steps — when leaning, the reward falls away and the
+    OrientationPenalty gradient takes over, teaching the robot to step to recover.
+    """
 
     scale: float = 1.0
     sensitivity: float = 0.01
@@ -552,6 +558,10 @@ class StandStillReward(ksim.Reward):
     angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
     joint_targets: tuple[float, ...] = attrs.field()
     stand_still_threshold: float = attrs.field(default=0.0)
+    # Orientation gate: reward is multiplied by exp(-lean_error / orientation_sensitivity).
+    # At 0° lean: gate=1.0 (full reward). At ~15° lean: gate≈0.1 (reward drops to 10%).
+    # Set to 0.0 to disable.
+    orientation_sensitivity: float = attrs.field(default=0.0)
 
     def get_reward(self, trajectory: ksim.Trajectory) -> Array:
         vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
@@ -564,6 +574,16 @@ class StandStillReward(ksim.Reward):
         )
         reward = jnp.exp(-error / self.sensitivity)
         reward *= cmd_norm < self.stand_still_threshold
+
+        # Orientation gate: drop reward when leaning so recovery steps aren't fought.
+        if self.orientation_sensitivity > 0.0:
+            quat = trajectory.qpos[..., 3:7]
+            up = jnp.array([0.0, 0.0, 1.0])
+            rot_up = Rotation(quat).apply(up)
+            lean_error = jnp.sum(jnp.square(rot_up[..., :2]), axis=-1)
+            orientation_gate = jnp.exp(-lean_error / self.orientation_sensitivity)
+            reward *= orientation_gate
+
         return reward
 
 

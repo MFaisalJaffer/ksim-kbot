@@ -438,7 +438,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 scale=-0.10,  # was -0.25 — kept relaxed to allow some hip motion
             ),
             kbot_rewards.TerminationPenalty(scale=-1.0),
-            kbot_rewards.OrientationPenalty(scale=-2.0),
+            kbot_rewards.OrientationPenalty(scale=-5.0),  # was -2.0 — stronger recovery gradient
             kbot_rewards.LinearVelocityTrackingReward(
                 scale=3.0,  # was 1.0 — increased to break standing-still local min
                 error_scale=0.5,  # was 0.25 — more lenient for bootstrapping: rewards partial tracking
@@ -473,7 +473,10 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # when joystick idle. Critical anchor that was missing in run_34.
             kbot_rewards.StandStillReward(
                 scale=50.0,
-                sensitivity=0.05,  # was 0.01 → 0.1 → 0.05
+                sensitivity=0.05,
+                # Orientation gate: reward drops when leaning so it doesn't fight
+                # against recovery foot steps. At ~15° lean the reward is ~10%.
+                orientation_sensitivity=0.05,
                 linear_velocity_cmd_name="linear_velocity_command",
                 angular_velocity_cmd_name="angular_velocity_command",
                 joint_targets=JOINT_TARGETS,
