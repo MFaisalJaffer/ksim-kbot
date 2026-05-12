@@ -754,7 +754,7 @@ if __name__ == "__main__":
     KbotWalkingJoystickRNNTask.launch(
         KbotWalkingJoystickRNNTaskConfig(
             num_envs=2048,  # 9.5GB at 1280 → scale up to use ~15GB of 16GB VRAM
-            batch_size=192,
+            batch_size=256,
             num_passes=4,
             epochs_per_log_step=1,
             # Simulation parameters.
