@@ -590,9 +590,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
-            # Tightened from 1.4 rad (80°) — was so permissive the robot could lie on
-            # its back with feet up and never terminate.
-            ksim.NotUprightTermination(max_radians=0.6),  # ~34°
+            ksim.NotUprightTermination(max_radians=1.2),  # ~69°
             # Terminate if base drops below 0.5m (half of 1.02m standing height).
             # Prevents the exploit of sinking underground / lying on back.
             ksim.MinimumHeightTermination(min_height=0.5),
@@ -765,7 +763,7 @@ if __name__ == "__main__":
             dt=0.002,
             ctrl_dt=0.02,
             action_latency_range=(0.0, 0.005),
-            rollout_length_seconds=2.0,  # phase 1: short rollouts for fast bootstrapping (was 5.0)
+            rollout_length_seconds=5.0,
             # PPO parameters
             action_scale=1.0,
             gamma=0.97,
