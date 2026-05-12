@@ -40,18 +40,21 @@ JOINT_TARGETS = (
     0.0,
     -1.4,
     0.0,
-    # right leg
-    -0.23,
+    # right leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
+    # All zeros = MJCF default (straight legs, flat feet).
+    # Previous values (-0.23, 0, 0, -0.873, 0.195) had ankle in wrong direction
+    # for the knee bend — caused robot to stand on tippy toes.
     0.0,
     0.0,
-    -0.873,
-    0.195,
-    # left leg
-    0.23,
     0.0,
     0.0,
-    0.873,
-    -0.195,
+    0.0,
+    # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
 )
 
 
