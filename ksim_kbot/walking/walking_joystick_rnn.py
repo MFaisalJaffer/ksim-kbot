@@ -753,8 +753,8 @@ if __name__ == "__main__":
     #   python -m ksim_kbot.walking.walking_joystick_rnn run_model_viewer=True
     KbotWalkingJoystickRNNTask.launch(
         KbotWalkingJoystickRNNTaskConfig(
-            num_envs=1280,  # reduced from 3072 to fit 5s rollouts in 16GB VRAM (same total steps/iter)
-            batch_size=128,  # scaled down from 192
+            num_envs=2048,  # 9.5GB at 1280 → scale up to use ~15GB of 16GB VRAM
+            batch_size=192,
             num_passes=4,
             epochs_per_log_step=1,
             # Simulation parameters.
