@@ -522,6 +522,11 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 knee_target=0.4,
                 sensitivity=0.1,
                 stand_still_threshold=self.config.stand_still_threshold,
+                # Gate: only reward bent knees if feet are also being lifted.
+                min_clearance=0.08,
+                max_foot_height=0.12,
+                ctrl_dt=self.config.ctrl_dt,
+                clearance_sensitivity=0.02,
             ),
             # Penalty for NOT cycling feet when commanded to move (complement of FeetPhaseReward).
             # Carrot + stick: FeetPhaseReward rewards correct gait, this penalizes incorrect gait.

@@ -677,16 +677,77 @@ class FeetPhaseReward(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class FootSwingClearancePenalty(ksim.Reward):
+    """Penalize foot dragging during swing phase.
+
+    When the gait clock expects a foot to be in the air (ideal height > min_clearance),
+    but the actual foot is below min_clearance, apply a penalty proportional to
+    how much it's dragging. Prevents the policy from shuffling feet along the ground.
+
+    Only active when command is non-zero.
+    """
+
+    min_clearance: float = attrs.field(default=0.08)  # ~3 inches
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    gait_freq_cmd_name: str = attrs.field(default="gait_frequency_command")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+    max_foot_height: float = attrs.field(default=0.12)
+    ctrl_dt: float = attrs.field(default=0.02)
+    stand_still_threshold: float = attrs.field(default=0.0)
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        # Compute gait phase clock (same as FeetPhaseReward)
+        gait_freq_n = trajectory.command[self.gait_freq_cmd_name]
+        phase_dt = 2 * jnp.pi * gait_freq_n * self.ctrl_dt
+        steps = jnp.int32(trajectory.timestep / self.ctrl_dt)
+        steps = jnp.repeat(steps[:, None], 2, axis=1)
+        start_phase = jnp.broadcast_to(jnp.array([0.0, jnp.pi]), (steps.shape[0], 2))
+        phase = start_phase + steps * phase_dt
+        phase = jnp.fmod(phase + jnp.pi, 2 * jnp.pi) - jnp.pi
+
+        # Expected foot height from gait clock
+        x = (phase + jnp.pi) / (2 * jnp.pi)
+        x = jnp.clip(x, 0, 1)
+        swing_h = jnp.array(self.max_foot_height)
+        stance = xax.cubic_bezier_interpolation(jnp.array(0.0), swing_h, 2 * x)
+        swing  = xax.cubic_bezier_interpolation(swing_h, jnp.array(0.0), 2 * x - 1)
+        ideal_z = jnp.where(x <= 0.5, stance, swing)  # shape (T, 2)
+
+        # Actual foot heights
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]
+        foot_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)  # (T, 2)
+
+        # How much the gait clock expects the foot above min_clearance
+        expected_above = jnp.maximum(ideal_z - self.min_clearance, 0.0)
+        # How much the foot is actually below min_clearance (dragging)
+        actual_below = jnp.maximum(self.min_clearance - foot_z, 0.0)
+
+        # Penalty = product: only fires when BOTH gait says "up" AND foot is dragging
+        penalty = jnp.sum(expected_above * actual_below, axis=-1)
+
+        # Only active when commanded to move
+        vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
+        ang_vel_cmd = trajectory.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([vel_cmd, ang_vel_cmd], axis=-1), axis=-1)
+        penalty *= cmd_norm > self.stand_still_threshold
+
+        return penalty
+
+
+@attrs.define(frozen=True, kw_only=True)
 class WalkingPostureReward(ksim.Reward):
-    """Reward bent knees when commanded to walk, straight knees when standing.
+    """Reward bent knees AND foot clearance when commanded to walk.
 
-    Solves the conflict between JOINT_TARGETS=0 (straight legs) and wanting
-    bent-knee walking gait. The target pose switches based on command:
-    - cmd > threshold: reward bent knees (right=-knee_target, left=+knee_target)
-    - cmd < threshold: handled by StandStillReward (straight legs)
+    Both posture (knee bend) and foot height must be satisfied simultaneously
+    to earn the full reward — neither alone is sufficient.
 
-    Only the knee joints are targeted here; hip and ankle are left to the
-    policy to discover naturally.
+    Reward = knee_match × foot_clearance_gate × is_walking
+
+    - knee_match: exp(-error / sensitivity), 1.0 when knees at target angles
+    - foot_clearance_gate: mean compliance across feet during swing phase.
+      For each foot in swing (ideal_z > 0), compliance = sigmoid-like function
+      of how far foot_z is above min_clearance. During stance, contributes 1.0.
     """
 
     # Desired knee bend when walking (positive value — applied with correct sign per leg).
@@ -698,6 +759,13 @@ class WalkingPostureReward(ksim.Reward):
     # qpos indices for knees (7-offset already removed — these are indices into qpos[7:])
     right_knee_idx: int = attrs.field(default=13)  # dof_right_knee_04
     left_knee_idx: int = attrs.field(default=18)   # dof_left_knee_04
+    # Foot clearance gate parameters
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    gait_freq_cmd_name: str = attrs.field(default="gait_frequency_command")
+    min_clearance: float = attrs.field(default=0.08)   # ~3 inches, same as FootSwingClearancePenalty
+    max_foot_height: float = attrs.field(default=0.12)
+    ctrl_dt: float = attrs.field(default=0.02)
+    clearance_sensitivity: float = attrs.field(default=0.02)  # sigmoid steepness for clearance gate
 
     def get_reward(self, trajectory: ksim.Trajectory) -> Array:
         vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
@@ -711,9 +779,36 @@ class WalkingPostureReward(ksim.Reward):
 
         r_error = jnp.square(r_knee - (-self.knee_target))
         l_error = jnp.square(l_knee - self.knee_target)
-        reward = jnp.exp(-(r_error + l_error) / self.sensitivity)
+        knee_match = jnp.exp(-(r_error + l_error) / self.sensitivity)
 
-        return reward * is_walking
+        # Foot clearance gate: only give reward if feet are also being lifted.
+        # Compute gait clock phase for each foot (left=0, right=π offset).
+        gait_freq_n = trajectory.command[self.gait_freq_cmd_name]
+        phase_dt = 2 * jnp.pi * gait_freq_n * self.ctrl_dt
+        steps = jnp.int32(trajectory.timestep / self.ctrl_dt)
+        steps = jnp.repeat(steps[:, None], 2, axis=1)
+        start_phase = jnp.broadcast_to(jnp.array([0.0, jnp.pi]), (steps.shape[0], 2))
+        phase = start_phase + steps * phase_dt
+        phase = jnp.fmod(phase + jnp.pi, 2 * jnp.pi) - jnp.pi
+        x = (phase + jnp.pi) / (2 * jnp.pi)
+        x = jnp.clip(x, 0, 1)
+        swing_h = jnp.array(self.max_foot_height)
+        stance_curve = xax.cubic_bezier_interpolation(jnp.array(0.0), swing_h, 2 * x)
+        swing_curve  = xax.cubic_bezier_interpolation(swing_h, jnp.array(0.0), 2 * x - 1)
+        ideal_z = jnp.where(x <= 0.5, stance_curve, swing_curve)
+
+        # For feet expected to be in swing (ideal_z > 0), gate by clearance compliance.
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]
+        foot_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)
+        in_swing = ideal_z > 0.0
+        # Smooth compliance: 1 when foot_z >= min_clearance, fades to 0 below
+        clearance_diff = (foot_z - self.min_clearance) / self.clearance_sensitivity
+        clearance_compliance = jax.nn.sigmoid(clearance_diff)
+        # During stance (not in swing), always contribute 1.0 to the gate
+        gate_per_foot = jnp.where(in_swing, clearance_compliance, 1.0)
+        foot_clearance_gate = jnp.mean(gate_per_foot, axis=-1)
+
+        return knee_match * foot_clearance_gate * is_walking
 
 
 @attrs.define(frozen=True, kw_only=True)
