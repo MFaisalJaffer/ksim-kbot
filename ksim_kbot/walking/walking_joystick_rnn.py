@@ -515,6 +515,16 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 velocity_match_sensitivity=0.25,
                 linvel_obs_name="base_linear_velocity_observation",
             ),
+            # Penalty for NOT cycling feet when commanded to move (complement of FeetPhaseReward).
+            # Carrot + stick: FeetPhaseReward rewards correct gait, this penalizes incorrect gait.
+            kbot_rewards.FeetPhasePenalty(
+                scale=-1.0,
+                foot_default_height=0.04,
+                max_foot_height=0.12,
+                sensitivity=0.01,
+                ctrl_dt=self.config.ctrl_dt,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:

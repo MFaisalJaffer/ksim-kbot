@@ -676,6 +676,60 @@ class FeetPhaseReward(ksim.Reward):
         return jnp.where(x <= 0.5, stance, swing)
 
 
+@attrs.define(frozen=True, kw_only=True)
+class FeetPhasePenalty(ksim.Reward):
+    """Penalty for NOT following the gait clock when commanded to move.
+
+    Complement of FeetPhaseReward: while FeetPhaseReward gives a carrot for
+    correct foot phasing, this gives a stick for incorrect phasing.
+    Returns (1 - phase_match) when command is active → 0 when perfect, 1 when terrible.
+    Use with negative scale.
+    """
+
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+    gait_freq_cmd_name: str = attrs.field(default="gait_frequency_command")
+    max_foot_height: float = attrs.field(default=0.12)
+    ctrl_dt: float = attrs.field(default=0.02)
+    sensitivity: float = attrs.field(default=0.01)
+    foot_default_height: float = attrs.field(default=0.0)
+    stand_still_threshold: float = attrs.field(default=0.0)
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        gait_freq_n = trajectory.command[self.gait_freq_cmd_name]
+        phase_dt = 2 * jnp.pi * gait_freq_n * self.ctrl_dt
+        steps = jnp.int32(trajectory.timestep / self.ctrl_dt)
+        steps = jnp.repeat(steps[:, None], 2, axis=1)
+        start_phase = jnp.broadcast_to(jnp.array([0.0, jnp.pi]), (steps.shape[0], 2))
+        phase = start_phase + steps * phase_dt
+        phase = jnp.fmod(phase + jnp.pi, 2 * jnp.pi) - jnp.pi
+
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]
+        foot_z = jnp.array([foot_pos[..., 2], foot_pos[..., 5]]).T
+        ideal_z = self._gait_phase(phase, swing_height=jnp.array(self.max_foot_height))
+        error = jnp.sum(jnp.square(foot_z - ideal_z), axis=-1)
+        phase_match = jnp.exp(-error / self.sensitivity)
+
+        # Penalty is (1 - match): 0 when perfect, 1 when completely off.
+        penalty = 1.0 - phase_match
+
+        # Only active when command is non-zero.
+        vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
+        ang_vel_cmd = trajectory.command[self.angular_velocity_cmd_name]
+        command_norm = jnp.linalg.norm(jnp.concatenate([vel_cmd, ang_vel_cmd], axis=-1), axis=-1)
+        penalty *= command_norm > self.stand_still_threshold
+
+        return penalty
+
+    def _gait_phase(self, phi: Array, swing_height: Array) -> Array:
+        x = (phi + jnp.pi) / (2 * jnp.pi)
+        x = jnp.clip(x, 0, 1)
+        stance = xax.cubic_bezier_interpolation(jnp.array(0), swing_height, 2 * x)
+        swing = xax.cubic_bezier_interpolation(swing_height, jnp.array(0), 2 * x - 1)
+        return jnp.where(x <= 0.5, stance, swing)
+
+
 @attrs.define(frozen=True)
 class TargetLinearVelocityReward(ksim.Reward):
     """Reward for forward motion."""
