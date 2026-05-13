@@ -576,6 +576,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             LastActionObservation,
             FeetContactObservation,
             FeetPositionObservation,
+            FeetEndpointsObservation,
             TrueHeightObservation,
         )
 
@@ -616,6 +617,9 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 foot_right_site_name="right_foot",
                 floor_threshold=0.00,
             ),
+            # Heel + toe corner positions for multi-point clearance checking in rewards.
+            # NOT used as policy input — only for reward computation.
+            FeetEndpointsObservation.create(physics_model=physics_model),
             TrueHeightObservation(),
         ]
 
