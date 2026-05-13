@@ -224,6 +224,47 @@ class FeetPositionObservation(ksim.Observation):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class FeetEndpointsObservation(ksim.Observation):
+    """World positions of heel and toe sites for each foot.
+
+    Returns a flat array of shape (12,):
+      [left_heel_xyz, left_toe_xyz, right_heel_xyz, right_toe_xyz]
+
+    Z-indices: left_heel=2, left_toe=5, right_heel=8, right_toe=11.
+    Used for multi-point foot clearance checking to prevent tilt exploits.
+    """
+
+    left_heel: int = attrs.field()
+    left_toe: int = attrs.field()
+    right_heel: int = attrs.field()
+    right_toe: int = attrs.field()
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        physics_model: ksim.PhysicsModel,
+        left_heel_site_name: str = "left_foot_heel",
+        left_toe_site_name: str = "left_foot_toe",
+        right_heel_site_name: str = "right_foot_heel",
+        right_toe_site_name: str = "right_foot_toe",
+    ) -> "FeetEndpointsObservation":
+        return cls(
+            left_heel=get_site_data_idx_from_name(physics_model, left_heel_site_name),
+            left_toe=get_site_data_idx_from_name(physics_model, left_toe_site_name),
+            right_heel=get_site_data_idx_from_name(physics_model, right_heel_site_name),
+            right_toe=get_site_data_idx_from_name(physics_model, right_toe_site_name),
+        )
+
+    def observe(self, state: ksim.ObservationInput, curriculum_level: Array, rng: PRNGKeyArray) -> Array:
+        lh = state.physics_state.data.site_xpos[self.left_heel]
+        lt = state.physics_state.data.site_xpos[self.left_toe]
+        rh = state.physics_state.data.site_xpos[self.right_heel]
+        rt = state.physics_state.data.site_xpos[self.right_toe]
+        return jnp.concatenate([lh, lt, rh, rt], axis=-1)
+
+
+@attrs.define(frozen=True, kw_only=True)
 class FeetContactObservation(ksim.FeetContactObservation):
     """Observation of the feet contact."""
 

@@ -423,6 +423,9 @@ class KbotWalkingTask(KbotStandingTask[Config], Generic[Config]):
                 foot_right_site_name="right_foot",
                 floor_threshold=0.00,
             ),
+            # Heel and toe corner positions — used for multi-point clearance checking in rewards.
+            # NOT fed into the policy network; only used for reward computation.
+            common.FeetEndpointsObservation.create(physics_model=physics_model),
             common.TrueHeightObservation(),
             # NOTE: Add collisions to hands
             # ksim.ContactObservation(

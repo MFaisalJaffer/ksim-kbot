@@ -689,6 +689,7 @@ class FootSwingClearancePenalty(ksim.Reward):
 
     min_clearance: float = attrs.field(default=0.08)  # ~3 inches
     feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    feet_endpoints_obs_name: str = attrs.field(default="feet_endpoints_observation")
     gait_freq_cmd_name: str = attrs.field(default="gait_frequency_command")
     linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
     angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
@@ -714,9 +715,14 @@ class FootSwingClearancePenalty(ksim.Reward):
         swing  = xax.cubic_bezier_interpolation(swing_h, jnp.array(0.0), 2 * x - 1)
         ideal_z = jnp.where(x <= 0.5, stance, swing)  # shape (T, 2)
 
-        # Actual foot heights
+        # Actual foot heights — use minimum across center + heel + toe per foot.
+        # Prevents tilt exploit: heel or toe touching ground = foot not clear.
         foot_pos = trajectory.obs[self.feet_pos_obs_name]
-        foot_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)  # (T, 2)
+        center_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)
+        ep = trajectory.obs[self.feet_endpoints_obs_name]
+        left_min_z  = jnp.minimum(ep[..., 2],  ep[..., 5])   # min(left_heel_z,  left_toe_z)
+        right_min_z = jnp.minimum(ep[..., 8],  ep[..., 11])  # min(right_heel_z, right_toe_z)
+        foot_z = jnp.minimum(center_z, jnp.stack([left_min_z, right_min_z], axis=-1))
 
         # How much the gait clock expects the foot above min_clearance
         expected_above = jnp.maximum(ideal_z - self.min_clearance, 0.0)
@@ -761,8 +767,9 @@ class WalkingPostureReward(ksim.Reward):
     left_knee_idx: int = attrs.field(default=18)   # dof_left_knee_04
     # Foot clearance gate parameters
     feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    feet_endpoints_obs_name: str = attrs.field(default="feet_endpoints_observation")
     gait_freq_cmd_name: str = attrs.field(default="gait_frequency_command")
-    min_clearance: float = attrs.field(default=0.08)   # ~3 inches, same as FootSwingClearancePenalty
+    min_clearance: float = attrs.field(default=0.08)   # ~3 inches
     max_foot_height: float = attrs.field(default=0.12)
     ctrl_dt: float = attrs.field(default=0.02)
     clearance_sensitivity: float = attrs.field(default=0.02)  # sigmoid steepness for clearance gate
@@ -798,13 +805,20 @@ class WalkingPostureReward(ksim.Reward):
         ideal_z = jnp.where(x <= 0.5, stance_curve, swing_curve)
 
         # For feet expected to be in swing (ideal_z > 0), gate by clearance compliance.
+        # Use minimum z across center + heel + toe to prevent tilt exploits.
+        # endpoints obs: [left_heel_xyz, left_toe_xyz, right_heel_xyz, right_toe_xyz]
         foot_pos = trajectory.obs[self.feet_pos_obs_name]
-        foot_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)
+        center_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)  # left, right
+        ep = trajectory.obs[self.feet_endpoints_obs_name]
+        left_min_z  = jnp.minimum(ep[..., 2],  ep[..., 5])   # min(left_heel_z,  left_toe_z)
+        right_min_z = jnp.minimum(ep[..., 8],  ep[..., 11])  # min(right_heel_z, right_toe_z)
+        endpoint_min_z = jnp.stack([left_min_z, right_min_z], axis=-1)
+        # Most conservative: min of center, heel, and toe — all three must clear
+        foot_z = jnp.minimum(center_z, endpoint_min_z)
+
         in_swing = ideal_z > 0.0
-        # Smooth compliance: 1 when foot_z >= min_clearance, fades to 0 below
         clearance_diff = (foot_z - self.min_clearance) / self.clearance_sensitivity
         clearance_compliance = jax.nn.sigmoid(clearance_diff)
-        # During stance (not in swing), always contribute 1.0 to the gate
         gate_per_foot = jnp.where(in_swing, clearance_compliance, 1.0)
         foot_clearance_gate = jnp.mean(gate_per_foot, axis=-1)
 
