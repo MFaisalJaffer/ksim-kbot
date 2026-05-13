@@ -759,7 +759,7 @@ class WalkingPostureReward(ksim.Reward):
     """
 
     # Minimum required knee bend — reward is full above this, decays below.
-    min_knee_bend: float = attrs.field(default=0.04)  # ~2°, just enough to discourage fully stiff legs
+    min_knee_bend: float = attrs.field(default=0.4)   # ~23°, must be meaningfully bent when walking
     sensitivity: float = attrs.field(default=0.05)   # how sharply reward falls below min_bend
     linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
     angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
