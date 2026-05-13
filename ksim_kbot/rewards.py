@@ -677,6 +677,46 @@ class FeetPhaseReward(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class WalkingPostureReward(ksim.Reward):
+    """Reward bent knees when commanded to walk, straight knees when standing.
+
+    Solves the conflict between JOINT_TARGETS=0 (straight legs) and wanting
+    bent-knee walking gait. The target pose switches based on command:
+    - cmd > threshold: reward bent knees (right=-knee_target, left=+knee_target)
+    - cmd < threshold: handled by StandStillReward (straight legs)
+
+    Only the knee joints are targeted here; hip and ankle are left to the
+    policy to discover naturally.
+    """
+
+    # Desired knee bend when walking (positive value — applied with correct sign per leg).
+    knee_target: float = attrs.field(default=0.4)
+    sensitivity: float = attrs.field(default=0.1)
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+    stand_still_threshold: float = attrs.field(default=0.1)
+    # qpos indices for knees (7-offset already removed — these are indices into qpos[7:])
+    right_knee_idx: int = attrs.field(default=13)  # dof_right_knee_04
+    left_knee_idx: int = attrs.field(default=18)   # dof_left_knee_04
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
+        ang_vel_cmd = trajectory.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([vel_cmd, ang_vel_cmd], axis=-1), axis=-1)
+        is_walking = cmd_norm > self.stand_still_threshold
+
+        # Right knee bends negative, left knee bends positive (robot convention).
+        r_knee = trajectory.qpos[..., 7 + self.right_knee_idx]
+        l_knee = trajectory.qpos[..., 7 + self.left_knee_idx]
+
+        r_error = jnp.square(r_knee - (-self.knee_target))
+        l_error = jnp.square(l_knee - self.knee_target)
+        reward = jnp.exp(-(r_error + l_error) / self.sensitivity)
+
+        return reward * is_walking
+
+
+@attrs.define(frozen=True, kw_only=True)
 class FeetPhasePenalty(ksim.Reward):
     """Penalty for NOT following the gait clock when commanded to move.
 

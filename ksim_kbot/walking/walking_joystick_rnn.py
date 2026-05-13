@@ -515,6 +515,14 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 velocity_match_sensitivity=0.25,
                 linvel_obs_name="base_linear_velocity_observation",
             ),
+            # Reward bent knees when walking (straight knees already rewarded by StandStillReward).
+            # Target: ~0.4 rad (~23°) bend each knee when cmd is active.
+            kbot_rewards.WalkingPostureReward(
+                scale=2.0,
+                knee_target=0.4,
+                sensitivity=0.1,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
             # Penalty for NOT cycling feet when commanded to move (complement of FeetPhaseReward).
             # Carrot + stick: FeetPhaseReward rewards correct gait, this penalizes incorrect gait.
             kbot_rewards.FeetPhasePenalty(
