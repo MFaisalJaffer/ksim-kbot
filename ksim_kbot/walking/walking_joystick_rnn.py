@@ -533,6 +533,14 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
+            # Penalize foot dragging during swing phase (enforce ~3 inch minimum clearance).
+            kbot_rewards.FootSwingClearancePenalty(
+                scale=-2.0,
+                min_clearance=0.08,
+                max_foot_height=0.12,
+                ctrl_dt=self.config.ctrl_dt,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
