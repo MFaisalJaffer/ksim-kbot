@@ -519,8 +519,8 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # Target: ~0.4 rad (~23°) bend each knee when cmd is active.
             kbot_rewards.WalkingPostureReward(
                 scale=2.0,
-                knee_target=0.4,
-                sensitivity=0.1,
+                min_knee_bend=0.04,  # ~2° — just enough to discourage fully stiff legs
+                sensitivity=0.05,
                 stand_still_threshold=self.config.stand_still_threshold,
                 # Gate: only reward bent knees if feet are also being lifted.
                 min_clearance=0.08,

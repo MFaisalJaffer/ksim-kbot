@@ -743,22 +743,24 @@ class FootSwingClearancePenalty(ksim.Reward):
 
 @attrs.define(frozen=True, kw_only=True)
 class WalkingPostureReward(ksim.Reward):
-    """Reward bent knees AND foot clearance when commanded to walk.
+    """Reward minimum knee bend AND foot clearance when commanded to walk.
 
-    Both posture (knee bend) and foot height must be satisfied simultaneously
-    to earn the full reward — neither alone is sufficient.
+    Requires knees to be bent at least min_knee_bend radians, but does NOT
+    prescribe a specific target angle — the policy is free to discover the
+    natural varying bend through the gait cycle.
 
-    Reward = knee_match × foot_clearance_gate × is_walking
+    Reward = knee_bend_reward × foot_clearance_gate × is_walking
 
-    - knee_match: exp(-error / sensitivity), 1.0 when knees at target angles
+    - knee_bend_reward: 1.0 when both knees exceed min_knee_bend, decays
+      smoothly to 0 when knees are straight. No penalty for bending MORE.
     - foot_clearance_gate: mean compliance across feet during swing phase.
-      For each foot in swing (ideal_z > 0), compliance = sigmoid-like function
-      of how far foot_z is above min_clearance. During stance, contributes 1.0.
+      For each foot in swing (ideal_z > 0), compliance = sigmoid of how far
+      foot_z is above min_clearance. During stance, contributes 1.0.
     """
 
-    # Desired knee bend when walking (positive value — applied with correct sign per leg).
-    knee_target: float = attrs.field(default=0.4)
-    sensitivity: float = attrs.field(default=0.1)
+    # Minimum required knee bend — reward is full above this, decays below.
+    min_knee_bend: float = attrs.field(default=0.04)  # ~2°, just enough to discourage fully stiff legs
+    sensitivity: float = attrs.field(default=0.05)   # how sharply reward falls below min_bend
     linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
     angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
     stand_still_threshold: float = attrs.field(default=0.1)
@@ -781,12 +783,14 @@ class WalkingPostureReward(ksim.Reward):
         is_walking = cmd_norm > self.stand_still_threshold
 
         # Right knee bends negative, left knee bends positive (robot convention).
+        # Use absolute value — we only care that the knee IS bent, not how much.
         r_knee = trajectory.qpos[..., 7 + self.right_knee_idx]
         l_knee = trajectory.qpos[..., 7 + self.left_knee_idx]
 
-        r_error = jnp.square(r_knee - (-self.knee_target))
-        l_error = jnp.square(l_knee - self.knee_target)
-        knee_match = jnp.exp(-(r_error + l_error) / self.sensitivity)
+        # Shortfall = how far below min_bend each knee is (0 if already bent enough).
+        r_shortfall = jnp.maximum(0.0, self.min_knee_bend - jnp.abs(r_knee))
+        l_shortfall = jnp.maximum(0.0, self.min_knee_bend - jnp.abs(l_knee))
+        knee_match = jnp.exp(-(r_shortfall + l_shortfall) / self.sensitivity)
 
         # Foot clearance gate: only give reward if feet are also being lifted.
         # Compute gait clock phase for each foot (left=0, right=π offset).
