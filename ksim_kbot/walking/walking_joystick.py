@@ -23,7 +23,8 @@ from ksim_kbot import common, rewards as kbot_rewards
 from ksim_kbot.standing.standing import MAX_TORQUE, KbotStandingTask, KbotStandingTaskConfig
 
 OBS_SIZE = 20 * 2 + 4 + 3 + 40 + 3  # = position + velocity + phase + projected_gravity + last_action + imu_gyro
-CMD_SIZE = 2 + 1 + 1
+# Commands: lin_vel(2) + ang_vel(1) + gait_freq(1) + arm_constraint(1 + 10 = 11)
+CMD_SIZE = 2 + 1 + 1 + 11
 NUM_INPUTS = OBS_SIZE + CMD_SIZE
 NUM_CRITIC_INPUTS = NUM_INPUTS + 2 + 6 + 3 + 3 + 4 + 3 + 3 + 20 + 1
 NUM_OUTPUTS = 20 * 2  # position + velocity
@@ -250,41 +251,48 @@ class KbotWalkingTask(KbotStandingTask[Config], Generic[Config]):
         metadata: dict[str, JointMetadataOutput] | None = None,
     ) -> ksim.Actuators:
         assert metadata is not None, "Metadata is required"
-        return common.TargetPositionMITActuators(
+        # Per-joint motor type — used to look up T-V curves for velocity-dependent
+        # torque limiting (sim-to-real). Order must match JOINT_TARGETS.
+        motor_types = (
+            # right arm
+            "04",  # shoulder_pitch
+            "04",  # shoulder_roll
+            "03",  # shoulder_yaw
+            "04",  # elbow
+            "00",  # wrist
+            # left arm
+            "04",  # shoulder_pitch
+            "04",  # shoulder_roll
+            "03",  # shoulder_yaw
+            "04",  # elbow
+            "00",  # wrist
+            # right leg
+            "04",  # hip_pitch
+            "04",  # hip_roll
+            "03",  # hip_yaw
+            "04",  # knee
+            "02",  # ankle
+            # left leg
+            "04",  # hip_pitch
+            "04",  # hip_roll
+            "03",  # hip_yaw
+            "04",  # knee
+            "02",  # ankle
+        )
+        return common.TVCurveMITActuators(
             physics_model,
             metadata,
             default_targets=JOINT_TARGETS,
+            motor_types=motor_types,
             pos_action_noise=0.05,
             vel_action_noise=0.05,
             pos_action_noise_type="gaussian",
             vel_action_noise_type="gaussian",
-            ctrl_clip=[
-                # right arm
-                MAX_TORQUE["04"],  # shoulder_pitch (22 Nm)
-                MAX_TORQUE["04"],  # shoulder_roll (22 Nm)
-                MAX_TORQUE["03"],  # shoulder_yaw
-                MAX_TORQUE["04"],  # elbow (22 Nm)
-                MAX_TORQUE["00"],  # wrist
-                # left arm
-                MAX_TORQUE["04"],  # shoulder_pitch (22 Nm)
-                MAX_TORQUE["04"],  # shoulder_roll (22 Nm)
-                MAX_TORQUE["03"],  # shoulder_yaw
-                MAX_TORQUE["04"],  # elbow (22 Nm)
-                MAX_TORQUE["00"],  # wrist
-                # right leg
-                MAX_TORQUE["04"],  # hip_pitch
-                MAX_TORQUE["04"],  # hip_roll (22 Nm)
-                MAX_TORQUE["03"],  # hip_yaw
-                MAX_TORQUE["04"],  # knee
-                MAX_TORQUE["02"],  # ankle
-                # left leg
-                MAX_TORQUE["04"],  # hip_pitch
-                MAX_TORQUE["04"],  # hip_roll (22 Nm)
-                MAX_TORQUE["03"],  # hip_yaw
-                MAX_TORQUE["04"],  # knee
-                MAX_TORQUE["02"],  # ankle
-            ],
+            ctrl_clip=[MAX_TORQUE[m] for m in motor_types],
             action_scale=self.config.action_scale,
+            # Randomize TV curve at ±15% (only weaker) so the policy doesn't
+            # over-rely on exact peak torque — real motors degrade when hot.
+            tv_curve_randomization=0.15,
         )
 
     def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
@@ -461,6 +469,8 @@ class KbotWalkingTask(KbotStandingTask[Config], Generic[Config]):
                     gait_freq_lower=self.config.gait_freq_lower,
                     gait_freq_upper=self.config.gait_freq_upper,
                 ),
+                # Evaluation mode — never constrain arms so we can observe natural gait.
+                common.ArmConstraintCommand(constraint_prob=0.0),
             ]
         else:
             # NOTE: increase to 360
@@ -481,6 +491,9 @@ class KbotWalkingTask(KbotStandingTask[Config], Generic[Config]):
                     gait_freq_lower=self.config.gait_freq_lower,
                     gait_freq_upper=self.config.gait_freq_upper,
                 ),
+                # 30% of episodes: arms locked to a random target pose. Forces
+                # policy to balance using legs/torso when arms aren't free.
+                common.ArmConstraintCommand(constraint_prob=0.3),
             ]
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:

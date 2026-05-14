@@ -83,6 +83,157 @@ class TargetPositionMITActuators(ksim.PositionVelocityActuator):
         )
 
 
+# Torque–velocity curves for the K-Bot 2 BLDC actuators.
+# omega in rad/s, tau in Nm. Sourced from the actuator datasheets.
+# At a given joint speed |omega|, the motor can deliver at most tau(|omega|) Nm.
+# Above the no-load speed, tau = 0 (motor cannot produce torque at all).
+TV_CURVES: dict[str, dict[str, tuple[float, ...]]] = {
+    # GIM_8108_8 — used for robstride_04 (high-torque joints: shoulder pitch/roll, elbow,
+    # hip pitch/roll, knee). 22 Nm peak, no-load speed ~21.5 rad/s.
+    "04": {
+        "omega": (0.0,  7.9,  9.9, 10.5, 11.5, 12.0, 13.1, 14.1,
+                  15.2, 15.7, 16.8, 17.8, 18.3, 18.8, 19.4, 19.9,
+                  20.9, 21.5),
+        "tau":   (22.0, 21.0, 20.0, 19.0, 17.0, 15.0, 14.0, 12.0,
+                  10.0,  9.0,  7.5,  6.0,  5.0,  4.0,  3.0,  2.0,
+                   1.0,  0.0),
+    },
+    # GIM_6010_8 — used for robstride_03 (shoulder yaw, hip yaw) and robstride_02 (ankle).
+    # 11 Nm peak, no-load speed ~29.8 rad/s.
+    "03": {
+        "omega": (0.0,  3.1,  4.7, 12.0, 14.1, 16.2, 18.3, 19.9,
+                  21.5, 23.0, 24.6, 25.7, 27.2, 29.8),
+        "tau":   (11.0, 10.5, 10.0,  9.7,  9.0,  8.0,  7.0,  6.0,
+                   5.0,  4.0,  3.0,  2.0,  1.1,  0.0),
+    },
+    # Same motor as "03".
+    "02": {
+        "omega": (0.0,  3.1,  4.7, 12.0, 14.1, 16.2, 18.3, 19.9,
+                  21.5, 23.0, 24.6, 25.7, 27.2, 29.8),
+        "tau":   (11.0, 10.5, 10.0,  9.7,  9.0,  8.0,  7.0,  6.0,
+                   5.0,  4.0,  3.0,  2.0,  1.1,  0.0),
+    },
+    # "00" wrist motor — TV curve unavailable, treat as constant 5 Nm (matches MAX_TORQUE).
+    "00": {
+        "omega": (0.0, 100.0),
+        "tau":   (5.0,   5.0),
+    },
+}
+
+
+def _build_tv_curve_arrays(motor_types: tuple[str, ...]) -> tuple[Array, Array]:
+    """Build padded per-joint (omega, tau) curve arrays from motor type labels."""
+    max_len = max(len(TV_CURVES[m]["omega"]) for m in motor_types)
+    omegas = []
+    taus = []
+    for m in motor_types:
+        omg = list(TV_CURVES[m]["omega"])
+        tau = list(TV_CURVES[m]["tau"])
+        # Pad with monotonically-increasing omega and tau=last (constant extrapolation).
+        while len(omg) < max_len:
+            omg.append(omg[-1] + 1.0)
+            tau.append(tau[-1])
+        omegas.append(omg)
+        taus.append(tau)
+    return jnp.array(omegas), jnp.array(taus)
+
+
+class TVCurveMITActuators(TargetPositionMITActuators):
+    """MIT-mode actuator with velocity-dependent torque limit (T-V curve).
+
+    Real BLDC motors cannot deliver peak torque at high speeds — back-EMF reduces
+    available torque as the motor spins faster. Modelling this in sim closes a
+    major sim-to-real gap: in stock-sim the policy learns gaits that demand peak
+    torque even at high joint velocities, which the real hardware physically
+    cannot deliver.
+
+    Per-joint behavior:
+      max_tau(omega) = interp(|qvel|, omega_curve_joint, tau_curve_joint)
+      ctrl_clipped   = clip(ctrl, -max_tau, +max_tau)
+
+    Randomization: at every step, each joint's TV curve tau values are scaled by
+    a random factor in [1 - tv_curve_randomization, 1.0]. Real motors degrade
+    when hot (torque dips), so we only ever scale DOWN, never up. This regularizes
+    the policy against over-reliance on exact peak torque.
+    """
+
+    def __init__(
+        self,
+        physics_model: ksim.PhysicsModel,
+        metadata: ksim.Metadata,
+        default_targets: tuple[float, ...] = (),
+        *,
+        motor_types: tuple[str, ...],
+        pos_action_noise: float = 0.0,
+        pos_action_noise_type: ksim.actuators.NoiseType = "none",
+        vel_action_noise: float = 0.0,
+        vel_action_noise_type: ksim.actuators.NoiseType = "none",
+        torque_noise: float = 0.0,
+        torque_noise_type: ksim.actuators.NoiseType = "none",
+        ctrl_clip: list[float] | None = None,
+        action_scale: float = 1.0,
+        tv_curve_randomization: float = 0.15,
+        freejoint_first: bool = True,
+    ) -> None:
+        super().__init__(
+            physics_model=physics_model,
+            metadata=metadata,
+            default_targets=default_targets,
+            pos_action_noise=pos_action_noise,
+            pos_action_noise_type=pos_action_noise_type,
+            vel_action_noise=vel_action_noise,
+            vel_action_noise_type=vel_action_noise_type,
+            torque_noise=torque_noise,
+            torque_noise_type=torque_noise_type,
+            ctrl_clip=ctrl_clip,
+            action_scale=action_scale,
+            freejoint_first=freejoint_first,
+        )
+        self.tv_omega_curves, self.tv_tau_curves = _build_tv_curve_arrays(motor_types)
+        self.tv_curve_randomization = float(tv_curve_randomization)
+
+    def _max_tau(self, qvel: Array, rng: PRNGKeyArray) -> Array:
+        """Compute per-joint max allowed torque given current joint velocity.
+
+        Uses linear interpolation on the per-joint T-V curve. Returns shape (num_joints,).
+        """
+        # |qvel| → max allowed tau by interpolating each joint's curve.
+        speed = jnp.abs(qvel)
+        max_tau = jax.vmap(jnp.interp)(speed, self.tv_omega_curves, self.tv_tau_curves)
+        # Random scale in [1 - rand, 1.0] — motors only get weaker, never stronger.
+        if self.tv_curve_randomization > 0.0:
+            scale = jax.random.uniform(
+                rng,
+                shape=max_tau.shape,
+                minval=1.0 - self.tv_curve_randomization,
+                maxval=1.0,
+            )
+            max_tau = max_tau * scale
+        return max_tau
+
+    def get_ctrl(self, action: Array, physics_data: ksim.PhysicsData, rng: PRNGKeyArray) -> Array:
+        pos_rng, vel_rng, tor_rng, tv_rng = jax.random.split(rng, 4)
+
+        current_pos = physics_data.qpos[7:]
+        current_vel = physics_data.qvel[6:]
+
+        target_position = action[: len(current_pos)] * self.action_scale + self.default_targets
+        target_velocity = action[len(current_pos) :] * self.action_scale
+        target_position = self.add_noise(self.action_noise, self.action_noise_type, target_position, pos_rng)
+        target_velocity = self.add_noise(self.vel_action_noise, self.vel_action_noise_type, target_velocity, vel_rng)
+
+        pos_delta = target_position - current_pos
+        vel_delta = target_velocity - current_vel
+        ctrl = self.kps * pos_delta + self.kds * vel_delta
+        ctrl = self.add_noise(self.torque_noise, self.torque_noise_type, ctrl, tor_rng)
+
+        # Velocity-dependent torque limit, then hard safety clip.
+        max_tau = self._max_tau(current_vel, tv_rng)
+        ctrl = jnp.clip(ctrl, -max_tau, max_tau)
+        ctrl = jnp.clip(ctrl, -self.ctrl_clip, self.ctrl_clip)
+        return ctrl
+
+
 class ScaledTorqueActuators(ksim.Actuators):
     """Direct torque control."""
 
@@ -411,6 +562,68 @@ class AngularVelocityCommand(ksim.Command):
         switch_mask = jax.random.bernoulli(rng_a, self.switch_prob)
         new_commands = self.initial_command(physics_data, curriculum_level, rng_b)
         return jnp.where(switch_mask, new_commands, prev_command)
+
+
+# Per-arm-joint sampling ranges for ArmConstraintCommand.
+# Conservative subset (~80%) of the MJCF joint ranges to avoid jamming poses
+# right up against the joint limits. Order matches JOINT_TARGETS arm slots (0..9).
+ARM_SAMPLE_RANGES: tuple[tuple[float, float], ...] = (
+    # right arm — shoulder_pitch (-3.14 to 1.40), shoulder_roll (-1.66 to 0.35),
+    #             shoulder_yaw (-1.66 to 1.66), elbow (0 to 2.48), wrist (-1.75 to 1.75)
+    (-2.50,  1.10),
+    (-1.30,  0.25),
+    (-1.30,  1.30),
+    ( 0.00,  2.00),
+    (-1.40,  1.40),
+    # left arm — mirror of right for pitch/roll/elbow, same for yaw/wrist
+    (-1.10,  2.50),
+    (-0.25,  1.30),
+    (-1.30,  1.30),
+    (-2.00,  0.00),
+    (-1.40,  1.40),
+)
+
+
+@attrs.define(frozen=True)
+class ArmConstraintCommand(ksim.Command):
+    """Per-episode arm-pose constraint command.
+
+    With probability `constraint_prob`, the episode is "constrained": the
+    arms must hold a randomly-sampled target pose throughout the episode.
+    Otherwise (`is_constrained` = 0), the arms are free and the constraint
+    reward contributes nothing.
+
+    This trains the policy to balance using legs/torso when the arms are
+    locked (e.g. carrying an object), instead of relying on arm swings.
+
+    Command layout (11 floats):
+        [0]       is_constrained ∈ {0, 1}
+        [1..11]   target_arm_joint_pose (10 joints: right arm 5, left arm 5)
+
+    Switch probability is 0 — the command is fixed for the whole episode so
+    the policy experiences a consistent constraint signal.
+    """
+
+    constraint_prob: float = attrs.field(default=0.3)
+    sample_ranges: tuple[tuple[float, float], ...] = attrs.field(default=ARM_SAMPLE_RANGES)
+
+    def initial_command(
+        self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
+    ) -> Array:
+        rng_flag, rng_pose = jax.random.split(rng)
+        is_constrained = jax.random.bernoulli(rng_flag, self.constraint_prob).astype(jnp.float32)
+        # Sample each arm joint uniformly within its allowed range.
+        mins = jnp.array([r[0] for r in self.sample_ranges])
+        maxs = jnp.array([r[1] for r in self.sample_ranges])
+        u = jax.random.uniform(rng_pose, shape=(len(self.sample_ranges),))
+        target_pose = mins + u * (maxs - mins)
+        return jnp.concatenate([is_constrained[None], target_pose], axis=-1)
+
+    def __call__(
+        self, prev_command: Array, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
+    ) -> Array:
+        # No mid-episode switching — the constraint is fixed for the whole episode.
+        return prev_command
 
 
 @attrs.define(frozen=True, kw_only=True)

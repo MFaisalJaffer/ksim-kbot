@@ -116,12 +116,13 @@ class KbotRNNActor(eqx.Module):
         lin_vel_cmd_2: Array,
         ang_vel_cmd: Array,
         gait_freq_cmd: Array,
+        arm_constraint_cmd_11: Array,
         last_action_n: Array,
         carry: Array,
     ) -> tuple[distrax.Normal, Array]:
         obs_n = jnp.concatenate(
             [
-                timestep_phase_4,  # 1
+                timestep_phase_4,  # 4
                 joint_pos_n,  # NUM_JOINTS
                 joint_vel_n,  # NUM_JOINTS
                 projected_gravity_3,  # 3
@@ -130,6 +131,7 @@ class KbotRNNActor(eqx.Module):
                 lin_vel_cmd_2,  # 2
                 ang_vel_cmd,  # 1
                 gait_freq_cmd,  # 1
+                arm_constraint_cmd_11,  # 11 — is_constrained + 10 target arm joints
                 # last_action_n,  # NUM_JOINTS
             ],
             axis=-1,
@@ -208,6 +210,7 @@ class KbotRNNCritic(eqx.Module):
         lin_vel_cmd_2: Array,
         ang_vel_cmd: Array,
         gait_freq_cmd: Array,
+        arm_constraint_cmd_11: Array,
         last_action_n: Array,
         # critic observations
         feet_contact_2: Array,
@@ -224,13 +227,14 @@ class KbotRNNCritic(eqx.Module):
     ) -> tuple[Array, Array]:
         obs_n = jnp.concatenate(
             [
-                timestep_phase_4,  # 1
+                timestep_phase_4,  # 4
                 joint_pos_n,  # NUM_JOINTS
                 joint_vel_n,  # NUM_JOINTS
                 projected_gravity_3,  # 3
                 lin_vel_cmd_2,  # 2
                 ang_vel_cmd,  # 1
                 gait_freq_cmd,  # 1
+                arm_constraint_cmd_11,  # 11
                 # last_action_n,  # NUM_JOINTS
                 feet_contact_2,  # 2
                 feet_position_6,  # 6
@@ -338,6 +342,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
         lin_vel_cmd_2 = commands["linear_velocity_command"]
         ang_vel_cmd = commands["angular_velocity_command"]
         gait_freq_cmd = commands["gait_frequency_command"]
+        arm_constraint_cmd_11 = commands["arm_constraint_command"]
         last_action_n = observations["last_action_observation"]
 
         return model.forward(
@@ -350,6 +355,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             lin_vel_cmd_2=lin_vel_cmd_2,
             ang_vel_cmd=ang_vel_cmd,
             gait_freq_cmd=gait_freq_cmd,
+            arm_constraint_cmd_11=arm_constraint_cmd_11,
             last_action_n=last_action_n,
             carry=carry,
         )
@@ -370,6 +376,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
         lin_vel_cmd_2 = commands["linear_velocity_command"]
         ang_vel_cmd = commands["angular_velocity_command"]
         gait_freq_cmd = commands["gait_frequency_command"]
+        arm_constraint_cmd_11 = commands["arm_constraint_command"]
         last_action_n = observations["last_action_observation"]
         # critic observations
         feet_contact_2 = observations["feet_contact_observation"]
@@ -390,6 +397,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             lin_vel_cmd_2=lin_vel_cmd_2,
             ang_vel_cmd=ang_vel_cmd,
             gait_freq_cmd=gait_freq_cmd,
+            arm_constraint_cmd_11=arm_constraint_cmd_11,
             last_action_n=last_action_n,
             # critic observations
             feet_contact_2=feet_contact_2,
@@ -545,6 +553,14 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 max_foot_height=0.12,
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            # Reward matching the commanded arm pose when an episode is constrained.
+            # When is_constrained=0, contributes nothing (arms free).
+            # When is_constrained=1, must hold the sampled target pose using legs
+            # for balance — trains carrying / holding behaviors.
+            kbot_rewards.ArmConstraintReward(
+                scale=3.0,
+                sensitivity=0.5,
             ),
         ]
 

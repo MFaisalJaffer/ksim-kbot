@@ -883,6 +883,40 @@ class FeetPhasePenalty(ksim.Reward):
         return jnp.where(x <= 0.5, stance, swing)
 
 
+@attrs.define(frozen=True, kw_only=True)
+class ArmConstraintReward(ksim.Reward):
+    """Penalty for deviating from a commanded arm pose, only when constrained.
+
+    Reads the ArmConstraintCommand (11 floats: is_constrained + 10 target joints).
+    When is_constrained = 1, returns an exp-shaped reward that peaks at 1.0 when
+    arms exactly match the target pose and decays to 0 as deviation grows.
+    When is_constrained = 0, returns 0 (no contribution either way).
+
+    Trains the policy to keep arms still on demand (carrying tasks) using only
+    legs/torso for balance, rather than relying on free arm swings.
+    """
+
+    command_name: str = attrs.field(default="arm_constraint_command")
+    sensitivity: float = attrs.field(default=0.5)  # how fast reward decays with deviation
+    # qpos indices for arm joints (offset of 7 for freejoint root already excluded —
+    # these are indices into qpos[7:]). Right arm 0..4, left arm 5..9.
+    arm_qpos_start: int = attrs.field(default=0)
+    arm_qpos_count: int = attrs.field(default=10)
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        cmd = trajectory.command[self.command_name]
+        is_constrained = cmd[..., 0]
+        target_pose = cmd[..., 1:1 + self.arm_qpos_count]
+
+        # Current arm joint angles.
+        arm_qpos = trajectory.qpos[..., 7 + self.arm_qpos_start : 7 + self.arm_qpos_start + self.arm_qpos_count]
+
+        # Sum of squared deviations across all arm joints.
+        sq_dev = jnp.sum(jnp.square(arm_qpos - target_pose), axis=-1)
+        reward = jnp.exp(-sq_dev / self.sensitivity)
+        return reward * is_constrained
+
+
 @attrs.define(frozen=True)
 class TargetLinearVelocityReward(ksim.Reward):
     """Reward for forward motion."""
