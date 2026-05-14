@@ -55,7 +55,7 @@ left arm:  shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist
 | `LinearVelocityTrackingReward` | 3.0 | Tracks the commanded `vx, vy` velocity. Exp-shaped, peaks when actual body velocity matches command. |
 | `AngularVelocityTrackingReward` | 1.0 | Tracks the commanded `wz`. |
 | `FeetPhaseReward` | 2.1 | Rewards each foot following the gait-clock height trajectory (cubic-Bezier stance→swing curve). Carrot for proper gait timing. |
-| `StandStillReward` | 50 | Large reward for *not moving* when commanded velocity is near zero. Has an `orientation_sensitivity=0.05` gate that fades the reward when the robot leans, so balance recovery isn't punished. |
+| `StandStillReward` | 15 | Reward for *not moving* when commanded velocity is near zero. Has an `orientation_sensitivity=0.05` gate that fades the reward when the robot leans, so balance recovery isn't punished. Reduced from 50 — previous setting dominated training and forced policy to a "stand still forever" local optimum. |
 | `SingleFootContactReward` | 0.5 | Rewards walking with only one foot on the ground at a time (canonical biped gait). |
 | `WalkingPostureReward` | 2.0 | When commanded to walk: rewards (a) at least `min_knee_bend=0.4 rad` (~23°) of knee flex AND (b) all three foot points (heel + center + toe) above `min_clearance=0.08m` during swing. Both must be satisfied — gates together so the robot can't earn knee reward without lifting feet. |
 | `ArmConstraintReward` | 3.0 | Only fires when `is_constrained=1`. Exp-shaped reward that peaks at 1.0 when arms exactly match the commanded target pose, decays with squared deviation (`sensitivity=0.5`). Forces the policy to balance using legs when arms are unavailable. |

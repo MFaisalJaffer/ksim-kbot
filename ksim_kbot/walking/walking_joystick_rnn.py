@@ -477,10 +477,12 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 linvel_obs_name="base_linear_velocity_observation",
             ),
             kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
-            # Restored to scale 50.0 — strong pull toward stable JOINT_TARGETS pose
-            # when joystick idle. Critical anchor that was missing in run_34.
+            # Scale reduced 50→15: previous setting dominated training and policy
+            # converged to a "stand still forever" local optimum, never learning to walk.
+            # 15 keeps the standing anchor present but lets velocity-tracking signal win
+            # when commanded to move.
             kbot_rewards.StandStillReward(
-                scale=50.0,
+                scale=15.0,
                 sensitivity=0.3,  # was 0.05 — wider basin lets robot shift weight to balance
                 # Orientation gate: reward drops when leaning so it doesn't fight
                 # against recovery foot steps. At ~15° lean the reward is ~10%.
@@ -531,7 +533,10 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 sensitivity=0.05,
                 stand_still_threshold=self.config.stand_still_threshold,
                 # Gate: only reward bent knees if feet are also being lifted.
-                min_clearance=0.08,
+                # Lowered 0.08→0.04 (~1.5") so the signal pays out earlier — robot can
+                # start earning the bent-knee bonus from small foot lifts and grow into
+                # the full 8cm clearance over training.
+                min_clearance=0.04,
                 max_foot_height=0.12,
                 ctrl_dt=self.config.ctrl_dt,
                 clearance_sensitivity=0.02,
@@ -546,10 +551,12 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
-            # Penalize foot dragging during swing phase (enforce ~3 inch minimum clearance).
+            # Penalize foot dragging during swing phase. Threshold lowered 0.08→0.04
+            # to align with WalkingPostureReward — once the robot can lift to 4cm we
+            # can revisit raising both thresholds together.
             kbot_rewards.FootSwingClearancePenalty(
                 scale=-2.0,
-                min_clearance=0.08,
+                min_clearance=0.04,
                 max_foot_height=0.12,
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
@@ -654,13 +661,13 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         # Auto-pacing curriculum with hysteresis to prevent thrashing.
         # - num_levels=20 → 0.05 increments (smaller jumps when bumping)
-        # - increase_threshold=120s → must sustain 2-min episodes before bumping up
+        # - increase_threshold=30s → must sustain 30s episodes before bumping up
         # - decrease_threshold=10s → only drop if episodes truly collapse
         # The wide gap between increase/decrease thresholds creates a stable dead-zone
         # so the policy can converge at each level instead of oscillating.
         return ksim.EpisodeLengthCurriculum(
             num_levels=20,
-            increase_threshold=120.0,
+            increase_threshold=30.0,
             decrease_threshold=10.0,
         )
 
