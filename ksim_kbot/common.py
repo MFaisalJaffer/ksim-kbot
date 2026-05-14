@@ -606,12 +606,24 @@ class ArmConstraintCommand(ksim.Command):
 
     constraint_prob: float = attrs.field(default=0.3)
     sample_ranges: tuple[tuple[float, float], ...] = attrs.field(default=ARM_SAMPLE_RANGES)
+    # Curriculum-gating: effective constraint prob = constraint_prob * curriculum_level.
+    # Disabled until the policy can sustain reasonable episodes; ramps in linearly with
+    # curriculum level (0 → 1), reaching the full constraint_prob only at level 1.
+    use_curriculum: bool = attrs.field(default=True)
 
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
     ) -> Array:
         rng_flag, rng_pose = jax.random.split(rng)
-        is_constrained = jax.random.bernoulli(rng_flag, self.constraint_prob).astype(jnp.float32)
+        # Scale constraint probability by curriculum level so basic walking is
+        # learned first (level 0 → no arm constraint), then arm tracking phases
+        # in as the policy gets stable (level 1 → full constraint_prob).
+        effective_prob = jnp.where(
+            self.use_curriculum,
+            self.constraint_prob * curriculum_level,
+            self.constraint_prob,
+        )
+        is_constrained = jax.random.bernoulli(rng_flag, effective_prob).astype(jnp.float32)
         # Sample each arm joint uniformly within its allowed range.
         mins = jnp.array([r[0] for r in self.sample_ranges])
         maxs = jnp.array([r[1] for r in self.sample_ranges])

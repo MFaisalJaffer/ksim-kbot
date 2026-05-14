@@ -33,7 +33,7 @@ slots — the policy treats them identically.
 | `linear_velocity_command` | 2 | every ~3s | `(vx, vy)` in m/s. Range trained: `vx ∈ [-0.3, 0.7]`, `vy ∈ [-0.2, 0.2]`. 30% zero probability for stand-still practice. |
 | `angular_velocity_command` | 1 | every ~3s | `wz` in rad/s. Scale 0.1, 90% zero probability (turning is rare). |
 | `gait_frequency_command` | 1 | per-episode | Step rate in Hz. Trained `[1.25, 1.5]`. Feeds into the foot-phase clock that defines the swing/stance schedule. |
-| `arm_constraint_command` | 11 | per-episode | `[is_constrained, 10× target_joint_angle]`. Sampled with 30% probability of `is_constrained=1`; arm targets uniformly sampled within MJCF joint ranges (conservative bounds). |
+| `arm_constraint_command` | 11 | per-episode | `[is_constrained, 10× target_joint_angle]`. `is_constrained=1` sampled with prob `0.3 × curriculum_level` (curriculum-gated — disabled at level 0 so walking is learned first, ramps in to full 30% by level 1). Arm targets uniformly sampled within MJCF joint ranges (conservative bounds). |
 
 ### Arm joint order (indices 1–10 of `arm_constraint_command`)
 ```
