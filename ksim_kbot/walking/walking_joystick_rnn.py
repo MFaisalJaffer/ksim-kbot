@@ -476,7 +476,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 translation_gate_sensitivity=0.05,
                 linvel_obs_name="base_linear_velocity_observation",
             ),
-            kbot_rewards.FeetSlipPenalty(scale=-0.25),
+            kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
             # Restored to scale 50.0 — strong pull toward stable JOINT_TARGETS pose
             # when joystick idle. Critical anchor that was missing in run_34.
             kbot_rewards.StandStillReward(

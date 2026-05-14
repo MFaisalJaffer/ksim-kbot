@@ -50,22 +50,41 @@ class JointDeviationPenalty(ksim.Reward):
 
 @attrs.define(frozen=True, kw_only=True)
 class FeetSlipPenalty(ksim.Reward):
-    """Penalty for feet slipping."""
+    """Penalty for feet sliding along the ground while in contact.
+
+    Measures the true horizontal velocity of each foot (computed by differencing
+    consecutive foot positions along the trajectory) and penalizes that velocity
+    only when the foot is in contact with the floor.
+
+      penalty = sum_over_feet( ||foot_xy_velocity|| * is_in_contact )
+
+    A foot that's planted while the body moves over it has velocity ≈ 0 in
+    world frame — so this is zero during normal walking. A foot that's
+    *sliding* along the ground generates a non-zero horizontal velocity while
+    in contact, which is exactly what we want to penalize.
+    """
 
     scale: float = -1.0
-    com_vel_obs_name: str = attrs.field(default="center_of_mass_velocity_observation")
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
     feet_contact_obs_name: str = attrs.field(default="feet_contact_observation")
+    ctrl_dt: float = attrs.field(default=0.02)
 
     def get_reward(self, trajectory: ksim.Trajectory) -> Array:
         if self.feet_contact_obs_name not in trajectory.obs:
             raise ValueError(
                 f"Observation {self.feet_contact_obs_name} not found; add it as an observation in your task."
             )
-        contact = trajectory.obs[self.feet_contact_obs_name]
-        body_vel = trajectory.obs[self.com_vel_obs_name][..., :2]
-        normed_body_vel = jnp.linalg.norm(body_vel, axis=-1, keepdims=True)
-        reward_value = jnp.sum(normed_body_vel * contact, axis=-1)
-        return reward_value
+        contact = trajectory.obs[self.feet_contact_obs_name]              # (T, 2)
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]                 # (T, 6) = [Lxyz, Rxyz]
+        # Stack xy positions per foot: (T, 2_feet, 2_xy)
+        foot_xy = jnp.stack([foot_pos[..., 0:2], foot_pos[..., 3:5]], axis=-2)
+        # Per-timestep horizontal velocity. First timestep gets zero by prepending itself.
+        foot_xy_vel = jnp.diff(foot_xy, axis=0, prepend=foot_xy[:1]) / self.ctrl_dt
+        # Speed per foot per timestep: (T, 2_feet)
+        foot_speed = jnp.linalg.norm(foot_xy_vel, axis=-1)
+        # Penalize only while in contact.
+        penalty = jnp.sum(foot_speed * contact, axis=-1)
+        return penalty
 
 
 @attrs.define(frozen=True, kw_only=True)
