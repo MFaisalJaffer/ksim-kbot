@@ -1,15 +1,26 @@
-"""Standalone macOS-compatible policy viewer with keyboard joystick control.
+"""Standalone macOS-compatible policy viewer with keyboard joystick + arm control.
 
 Usage:
     mjpython view_mac.py --ckpt /path/to/ckpt.bin
 
-Controls:
+Joystick controls:
     W / S       — forward / backward
     A / D       — turn left / right
     Q / E       — strafe left / right
-    SPACE       — stop (zero all commands)
+    SPACE       — stop (zero all velocity commands)
     R           — reset episode
     ESC         — quit
+
+Arm controls (cycle through preset poses while the policy walks):
+    T           — toggle arm constraint on / off
+    1           — preset 1: neutral default (right=+1.4 elbow, left=-1.4 elbow)
+    2           — preset 2: both arms forward, elbows bent (carry box)
+    3           — preset 3: both arms down at sides
+    4           — preset 4: both arms raised overhead
+    5           — preset 5: right hand up (waving)
+    6           — preset 6: arms at chest (holding tray)
+
+Status line shows: velocity command, gait freq, arm constraint flag, current pose preset.
 
 Uses mujoco.viewer.launch_passive which is designed for mjpython on macOS.
 """
@@ -31,9 +42,30 @@ import mujoco.viewer
 import numpy as np
 from jaxtyping import Array, PRNGKeyArray
 
+# ── Arm pose presets ─────────────────────────────────────────────────────────
+# Each entry is a 10-vector: right arm (shoulder_pitch, shoulder_roll, shoulder_yaw,
+# elbow, wrist) then left arm in the same order.
+ARM_PRESETS = {
+    1: ("neutral default",       ( 0.0, 0.0, 0.0,  1.4, 0.0,    0.0, 0.0, 0.0, -1.4, 0.0)),
+    2: ("carry box (arms fwd)",  ( 1.2, 0.3, 0.0,  1.8, 0.0,    1.2,-0.3, 0.0, -1.8, 0.0)),
+    3: ("arms down at sides",    ( 0.0, 0.0, 0.0,  0.2, 0.0,    0.0, 0.0, 0.0, -0.2, 0.0)),
+    4: ("arms overhead",         (-2.0, 0.0, 0.0,  0.4, 0.0,   -2.0, 0.0, 0.0, -0.4, 0.0)),
+    5: ("right hand up (wave)",  (-1.8, 0.3, 0.0,  1.2, 0.0,    0.0, 0.0, 0.0, -1.4, 0.0)),
+    6: ("arms at chest (tray)",  ( 0.6, 0.2, 0.0,  2.0, 0.0,    0.6,-0.2, 0.0, -2.0, 0.0)),
+}
+
 # ── Global keyboard command state ────────────────────────────────────────────
 # Updated by key callback; read by KeyboardCommand objects inside the step loop.
-_CMD = {"vx": 0.0, "vy": 0.0, "wz": 0.0, "reset": False}
+_CMD: dict = {
+    "vx": 0.0,
+    "vy": 0.0,
+    "wz": 0.0,
+    "reset": False,
+    # Arm constraint state
+    "is_constrained": 0.0,
+    "arm_preset": 1,
+    "arm_target": ARM_PRESETS[1][1],
+}
 
 # Step sizes per keypress
 VX_STEP = 0.1   # m/s
@@ -45,10 +77,31 @@ KEY_W, KEY_S, KEY_A, KEY_D = 87, 83, 65, 68
 KEY_Q, KEY_E = 81, 69
 KEY_SPACE = 32
 KEY_R = 82
+KEY_T = 84
 KEY_ESC = 256
+KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6 = 49, 50, 51, 52, 53, 54
 
 GLFW_PRESS   = 1
 GLFW_REPEAT  = 2
+
+
+def _print_status() -> None:
+    vx, vy, wz = _CMD["vx"], _CMD["vy"], _CMD["wz"]
+    cflag = "ON " if _CMD["is_constrained"] else "off"
+    pset = _CMD["arm_preset"]
+    name = ARM_PRESETS[pset][0]
+    print(
+        f"\r  cmd: vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}   "
+        f"arm[{cflag}] preset {pset}={name:<24s}",
+        end="", flush=True,
+    )
+
+
+def _set_preset(preset_idx: int) -> None:
+    if preset_idx not in ARM_PRESETS:
+        return
+    _CMD["arm_preset"] = preset_idx
+    _CMD["arm_target"] = ARM_PRESETS[preset_idx][1]
 
 
 def key_callback(keycode: int, scancode: int = 0, action: int = 1, mods: int = 0) -> None:
@@ -71,9 +124,23 @@ def key_callback(keycode: int, scancode: int = 0, action: int = 1, mods: int = 0
     elif keycode == KEY_R:
         _CMD["vx"] = _CMD["vy"] = _CMD["wz"] = 0.0
         _CMD["reset"] = True
+    elif keycode == KEY_T:
+        # Toggle arm constraint
+        _CMD["is_constrained"] = 1.0 - _CMD["is_constrained"]
+    elif keycode == KEY_1:
+        _set_preset(1)
+    elif keycode == KEY_2:
+        _set_preset(2)
+    elif keycode == KEY_3:
+        _set_preset(3)
+    elif keycode == KEY_4:
+        _set_preset(4)
+    elif keycode == KEY_5:
+        _set_preset(5)
+    elif keycode == KEY_6:
+        _set_preset(6)
 
-    vx, vy, wz = _CMD["vx"], _CMD["vy"], _CMD["wz"]
-    print(f"\r  cmd: vx={vx:+.2f}  vy={vy:+.2f}  wz={wz:+.2f}    ", end="", flush=True)
+    _print_status()
 
 
 # ── Keyboard-controlled command classes ─────────────────────────────────────
@@ -86,7 +153,7 @@ class KeyboardLinearVelocityCommand(ksim.Command):
     """Linear velocity command driven by keyboard state."""
 
     def get_name(self) -> str:
-        return "linear_velocity_command"  # must match what the policy observes
+        return "linear_velocity_command"
 
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
@@ -108,7 +175,7 @@ class KeyboardAngularVelocityCommand(ksim.Command):
     """Angular velocity command driven by keyboard state."""
 
     def get_name(self) -> str:
-        return "angular_velocity_command"  # must match what the policy observes
+        return "angular_velocity_command"
 
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
@@ -123,6 +190,37 @@ class KeyboardAngularVelocityCommand(ksim.Command):
         rng: PRNGKeyArray,
     ) -> Array:
         return jnp.array([_CMD["wz"]])
+
+
+@attrs.define(frozen=True, kw_only=True)
+class KeyboardArmConstraintCommand(ksim.Command):
+    """Arm constraint command driven by keyboard state.
+
+    Reads `is_constrained` flag and the current `arm_target` 10-vector from the
+    global _CMD dict and returns the 11-dim command the policy expects.
+    """
+
+    def get_name(self) -> str:
+        return "arm_constraint_command"
+
+    def _build_cmd(self) -> Array:
+        return jnp.concatenate(
+            [jnp.array([_CMD["is_constrained"]]), jnp.array(_CMD["arm_target"])]
+        )
+
+    def initial_command(
+        self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
+    ) -> Array:
+        return self._build_cmd()
+
+    def __call__(
+        self,
+        prev_command: Array,
+        physics_data: ksim.PhysicsData,
+        curriculum_level: Array,
+        rng: PRNGKeyArray,
+    ) -> Array:
+        return self._build_cmd()
 
 
 # ── Task subclass with keyboard commands ─────────────────────────────────────
@@ -143,6 +241,7 @@ def run_viewer_with_policy(ckpt_path: str) -> None:
                     gait_freq_lower=self.config.gait_freq_lower,
                     gait_freq_upper=self.config.gait_freq_upper,
                 ),
+                KeyboardArmConstraintCommand(),
             ]
 
     cfg = KbotWalkingJoystickRNNTaskConfig(
@@ -230,8 +329,12 @@ def run_viewer_with_policy(ckpt_path: str) -> None:
         mujoco.mj_forward(mj_model, mj_data)
 
         print("\nLaunching viewer with keyboard control:")
-        print("  W/S = forward/back    A/D = turn    Q/E = strafe")
-        print("  SPACE = stop          R = reset episode")
+        print("  Joystick:  W/S = fwd/back   A/D = turn   Q/E = strafe   SPACE = stop   R = reset")
+        print("  Arms:      T = toggle constraint   1-6 = preset pose")
+        print()
+        print("  Arm presets:")
+        for i, (name, _) in ARM_PRESETS.items():
+            print(f"    {i} — {name}")
         print()
 
         with mujoco.viewer.launch_passive(
