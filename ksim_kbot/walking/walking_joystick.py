@@ -42,20 +42,21 @@ JOINT_TARGETS = (
     -1.4,
     0.0,
     # right leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
-    # All zeros = MJCF default (straight legs, flat feet).
-    # Previous values (-0.23, 0, 0, -0.873, 0.195) had ankle in wrong direction
-    # for the knee bend — caused robot to stand on tippy toes.
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
+    # "Ready to walk" stance: slight knee bend with OPPOSITE-SIGN ankle compensation
+    # to keep the foot perfectly flat. Verified by forward-kinematics: heel + center +
+    # toe all land at z = 0.0205m (same height). The sign relationship is empirical —
+    # right knee = -0.1 needs right ankle = +0.1; left knee = +0.1 needs left ankle = -0.1.
+    0.0,    # hip_pitch
+    0.0,    # hip_roll
+    0.0,    # hip_yaw
+    -0.1,   # knee — slight bend (~5.7°)
+    +0.1,   # ankle — opposite-sign compensation keeps foot flat
+    # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle (mirror of right)
+    0.0,    # hip_pitch
+    0.0,    # hip_roll
+    0.0,    # hip_yaw
+    +0.1,   # knee — slight bend (~5.7°)
+    -0.1,   # ankle — opposite-sign compensation keeps foot flat
 )
 
 

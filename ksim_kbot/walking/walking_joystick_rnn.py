@@ -137,7 +137,42 @@ class KbotRNNActor(eqx.Module):
             axis=-1,
         )
 
-        return self.call_flat_obs(obs_n, carry)
+        dist_n, new_carry = self.call_flat_obs(obs_n, carry)
+
+        # ── External arm controller override ────────────────────────────────
+        # When is_constrained=1, arms are driven by an external controller
+        # (carrying object, manipulation task, etc.). The walking policy MUST
+        # treat them as unavailable for balance. To enforce this in training, we
+        # replace the policy's arm action with one that drives arms to the
+        # commanded target — and pin std small so the action is deterministic.
+        # The policy gets zero gradient on arm outputs when constrained, so it
+        # learns to ignore arms and balance with legs/torso alone.
+        is_constrained = arm_constraint_cmd_11[..., 0]                  # scalar
+        target_arm_pose = arm_constraint_cmd_11[..., 1:11]              # (10,)
+        # Arm portion of JOINT_TARGETS (first 10 entries: 5 right arm + 5 left arm)
+        joint_targets_arm = jnp.array(JOINT_TARGETS[:10])
+        pos_delta_arm_constrained = target_arm_pose - joint_targets_arm  # (10,)
+
+        mean = dist_n.mean()                                            # (40,)
+        std = dist_n.stddev()                                           # (40,)
+        # Mask broadcasts: 1 when constrained, 0 when free
+        mask = (is_constrained > 0.5).astype(mean.dtype)
+        small_std = jnp.full((10,), 0.05, dtype=std.dtype)
+
+        # Pos deltas:  [arm_pos_10 | leg_pos_10]
+        arm_pos_mean = mask * pos_delta_arm_constrained + (1.0 - mask) * mean[..., 0:10]
+        arm_pos_std  = mask * small_std                  + (1.0 - mask) * std[..., 0:10]
+        # Vel deltas:  [arm_vel_10 | leg_vel_10]
+        arm_vel_mean = (1.0 - mask) * mean[..., 20:30]                  # zero when constrained
+        arm_vel_std  = mask * small_std + (1.0 - mask) * std[..., 20:30]
+
+        new_mean = jnp.concatenate(
+            [arm_pos_mean, mean[..., 10:20], arm_vel_mean, mean[..., 30:40]], axis=-1
+        )
+        new_std = jnp.concatenate(
+            [arm_pos_std,  std[..., 10:20],  arm_vel_std,  std[..., 30:40]],  axis=-1
+        )
+        return distrax.Normal(new_mean, new_std), new_carry
 
     def call_flat_obs(self, obs_n: Array, carry: Array) -> tuple[distrax.Normal, Array]:
         x_n = self.input_proj(obs_n)
@@ -570,13 +605,31 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
-            # Reward matching the commanded arm pose when an episode is constrained.
-            # When is_constrained=0, contributes nothing (arms free).
-            # When is_constrained=1, must hold the sampled target pose using legs
-            # for balance — trains carrying / holding behaviors.
-            kbot_rewards.ArmConstraintReward(
-                scale=3.0,
-                sensitivity=0.5,
+            # NOTE: ArmConstraintReward removed. With the actor-side action
+            # override (forward() replaces arm action when is_constrained=1),
+            # the arms are externally controlled and always match the target.
+            # No reward is needed to incentivize matching.
+            # ── Diagnostic logger (scale=0, does not affect training) ──
+            # TV-curve saturation per step: |applied_torque| / max_tau_motoring(|qvel|),
+            # averaged across motoring joints. Reports how often the policy is at the
+            # velocity-dependent torque limit. >0.9 = saturating, sim-to-real warning.
+            kbot_rewards.TVCurveSaturationReward(
+                scale=0.0,
+                motor_types=(
+                    "04", "04", "03", "04", "00",  # right arm
+                    "04", "04", "03", "04", "00",  # left arm
+                    "04", "04", "03", "04", "02",  # right leg
+                    "04", "04", "03", "04", "02",  # left leg
+                ),
+            ),
+            kbot_rewards.TVCurvePeakSaturationReward(
+                scale=0.0,
+                motor_types=(
+                    "04", "04", "03", "04", "00",
+                    "04", "04", "03", "04", "00",
+                    "04", "04", "03", "04", "02",
+                    "04", "04", "03", "04", "02",
+                ),
             ),
         ]
 
@@ -670,13 +723,16 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         # Auto-pacing curriculum with hysteresis to prevent thrashing.
         # - num_levels=20 → 0.05 increments (smaller jumps when bumping)
-        # - increase_threshold=30s → must sustain 30s episodes before bumping up
+        # - increase_threshold=60s → must sustain 60s episodes before bumping up
+        #   (was 30s; raised so policy fully masters each level before adding
+        #   difficulty — at 30s the curriculum advanced before the policy could
+        #   handle the new pushes/arm constraints layered on by the next level)
         # - decrease_threshold=10s → only drop if episodes truly collapse
         # The wide gap between increase/decrease thresholds creates a stable dead-zone
         # so the policy can converge at each level instead of oscillating.
         return ksim.EpisodeLengthCurriculum(
             num_levels=20,
-            increase_threshold=30.0,
+            increase_threshold=60.0,
             decrease_threshold=10.0,
         )
 
@@ -830,7 +886,13 @@ if __name__ == "__main__":
             dt=0.002,
             ctrl_dt=0.02,
             action_latency_range=(0.0, 0.005),
-            rollout_length_seconds=5.0,
+            # Rollout shortened from 5s → 2s for early-training speed. While
+            # the policy is still learning to stand/take first steps, episodes
+            # rarely survive past a few seconds anyway — short rollouts give
+            # ~2.5× more PPO updates per wall-clock minute. Bump back to 5s
+            # once episodes consistently survive longer and we need long-horizon
+            # credit assignment for full walking cycles.
+            rollout_length_seconds=2.0,
             # PPO parameters
             action_scale=1.0,
             gamma=0.97,

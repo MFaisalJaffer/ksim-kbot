@@ -745,6 +745,87 @@ class FootAirTimeReward(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class TVCurveSaturationReward(ksim.Reward):
+    """Diagnostic logger (scale=0): mean motoring-side T-V saturation per step.
+
+    For each joint, computes saturation = |applied_torque| / max_tau_motoring(|qvel|),
+    where max_tau_motoring is the velocity-dependent torque limit from the T-V curve.
+    Returns the mean of saturation across **joints that are currently motoring**
+    (sign(ctrl) == sign(qvel)). Braking joints aren't included — the TV curve
+    doesn't limit them.
+
+    Reading the metric:
+      0.0 - 0.3 : comfortable headroom, T-V curve not biting
+      0.3 - 0.7 : moderate use of available motoring torque
+      0.7 - 0.9 : approaching the T-V limit
+      > 0.9     : actively saturating — policy demanding more than motors can deliver
+                  at current joint speeds, sim-to-real warning sign
+
+    Pair with TVCurvePeakSaturationReward to also see the worst joint per step.
+    """
+
+    motor_types: tuple[str, ...] = attrs.field()
+    actuator_force_obs_name: str = attrs.field(default="actuator_force_observation")
+    joint_velocity_obs_name: str = attrs.field(default="joint_velocity_observation")
+
+    def _max_tau_motoring(self, qvel: Array) -> Array:
+        # Import lazily — common.py imports rewards.py only indirectly.
+        from ksim_kbot.common import _build_tv_curve_arrays
+        omega_curves, tau_curves = _build_tv_curve_arrays(self.motor_types)
+        speed = jnp.abs(qvel)
+        # vmap over (leading dims, joints): interp each joint speed against its own curve.
+        leading_shape = speed.shape[:-1]
+        speed_flat = speed.reshape(-1, speed.shape[-1])  # (B, N)
+        per_step = lambda s: jax.vmap(jnp.interp)(s, omega_curves, tau_curves)
+        max_tau_flat = jax.vmap(per_step)(speed_flat)
+        return max_tau_flat.reshape(speed.shape)
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        ctrl = trajectory.obs[self.actuator_force_obs_name]
+        qvel = trajectory.obs[self.joint_velocity_obs_name]
+        max_tau = self._max_tau_motoring(qvel)
+
+        is_motoring = ctrl * qvel > 0.0
+        saturation = jnp.abs(ctrl) / (max_tau + 1e-6)
+        # Average only over motoring joints to avoid diluting with braking/idle joints.
+        motoring_sum = jnp.sum(saturation * is_motoring.astype(jnp.float32), axis=-1)
+        motoring_count = jnp.sum(is_motoring.astype(jnp.float32), axis=-1)
+        return jnp.where(motoring_count > 0, motoring_sum / (motoring_count + 1e-6), 0.0)
+
+
+@attrs.define(frozen=True, kw_only=True)
+class TVCurvePeakSaturationReward(ksim.Reward):
+    """Diagnostic logger (scale=0): worst-joint T-V saturation per step.
+
+    Same as TVCurveSaturationReward but reports the **max** saturation across
+    motoring joints (the joint currently closest to its motoring torque limit).
+    A persistent peak above 0.9 means at least one joint is repeatedly pegging
+    the T-V curve.
+    """
+
+    motor_types: tuple[str, ...] = attrs.field()
+    actuator_force_obs_name: str = attrs.field(default="actuator_force_observation")
+    joint_velocity_obs_name: str = attrs.field(default="joint_velocity_observation")
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        from ksim_kbot.common import _build_tv_curve_arrays
+        omega_curves, tau_curves = _build_tv_curve_arrays(self.motor_types)
+
+        ctrl = trajectory.obs[self.actuator_force_obs_name]
+        qvel = trajectory.obs[self.joint_velocity_obs_name]
+
+        speed = jnp.abs(qvel)
+        speed_flat = speed.reshape(-1, speed.shape[-1])
+        per_step = lambda s: jax.vmap(jnp.interp)(s, omega_curves, tau_curves)
+        max_tau = jax.vmap(per_step)(speed_flat).reshape(speed.shape)
+
+        is_motoring = ctrl * qvel > 0.0
+        # Saturation only where motoring, else 0 (so it doesn't affect the max).
+        saturation = jnp.where(is_motoring, jnp.abs(ctrl) / (max_tau + 1e-6), 0.0)
+        return jnp.max(saturation, axis=-1)
+
+
+@attrs.define(frozen=True, kw_only=True)
 class FootSwingClearancePenalty(ksim.Reward):
     """Penalize foot dragging during swing phase.
 

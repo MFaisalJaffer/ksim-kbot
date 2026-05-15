@@ -59,7 +59,7 @@ left arm:  shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist
 | `FootAirTimeReward` | 1.0 | **Bootstrap reward** for getting an entire foot off the ground (heel + center + toe all above 3cm) when commanded to walk. Ungated by gait clock — any lift earns reward. Designed to push the policy out of "both feet planted" attractor before the more selective gait rewards can pay out. |
 | `SingleFootContactReward` | 0.5 | Rewards walking with only one foot on the ground at a time (canonical biped gait). |
 | `WalkingPostureReward` | 2.0 | When commanded to walk: rewards (a) at least `min_knee_bend=0.4 rad` (~23°) of knee flex AND (b) all three foot points (heel + center + toe) above `min_clearance=0.08m` during swing. Both must be satisfied — gates together so the robot can't earn knee reward without lifting feet. |
-| `ArmConstraintReward` | 3.0 | Only fires when `is_constrained=1`. Exp-shaped reward that peaks at 1.0 when arms exactly match the commanded target pose, decays with squared deviation (`sensitivity=0.5`). Forces the policy to balance using legs when arms are unavailable. |
+| ~~`ArmConstraintReward`~~ | ~~3.0~~ | **Removed**. Arms are now driven by an external controller (the actor's arm output is overridden when `is_constrained=1`), so no reward is needed to incentivize matching — they match automatically. |
 
 ---
 
