@@ -384,6 +384,21 @@ class FeetPositionObservation(ksim.Observation):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class AppliedTorqueObservation(ksim.Observation):
+    """Per-step applied joint torque, read from data.ctrl.
+
+    ksim's built-in ActuatorForceObservation reads data.actuator_force which
+    may not be reliably populated in MJX for all actuator types. Our custom
+    actuators (TargetPositionMITActuators / TVCurveMITActuators) write the
+    computed torque directly to data.ctrl, so reading data.ctrl gives the
+    true applied torque per joint per step.
+    """
+
+    def observe(self, state: ksim.ObservationInput, curriculum_level: Array, rng: PRNGKeyArray) -> Array:
+        return state.physics_state.data.ctrl
+
+
+@attrs.define(frozen=True, kw_only=True)
 class FeetEndpointsObservation(ksim.Observation):
     """World positions of heel and toe sites for each foot.
 

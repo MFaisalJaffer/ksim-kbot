@@ -765,7 +765,7 @@ class TVCurveSaturationReward(ksim.Reward):
     """
 
     motor_types: tuple[str, ...] = attrs.field()
-    actuator_force_obs_name: str = attrs.field(default="actuator_force_observation")
+    actuator_force_obs_name: str = attrs.field(default="applied_torque_observation")
     joint_velocity_obs_name: str = attrs.field(default="joint_velocity_observation")
 
     def _max_tau_motoring(self, qvel: Array) -> Array:
@@ -804,7 +804,7 @@ class TVCurvePeakSaturationReward(ksim.Reward):
     """
 
     motor_types: tuple[str, ...] = attrs.field()
-    actuator_force_obs_name: str = attrs.field(default="actuator_force_observation")
+    actuator_force_obs_name: str = attrs.field(default="applied_torque_observation")
     joint_velocity_obs_name: str = attrs.field(default="joint_velocity_observation")
 
     def get_reward(self, trajectory: ksim.Trajectory) -> Array:

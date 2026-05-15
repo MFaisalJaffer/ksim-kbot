@@ -665,6 +665,7 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             FeetPositionObservation,
             FeetEndpointsObservation,
             TrueHeightObservation,
+            AppliedTorqueObservation,
         )
 
         return [
@@ -672,6 +673,10 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             JointPositionObservation(default_targets=JOINT_TARGETS, noise=0.05),
             ksim.JointVelocityObservation(noise=vel_obs_noise),
             ksim.ActuatorForceObservation(),
+            # Custom obs reads data.ctrl (where our MIT actuator writes torque).
+            # data.actuator_force isn't reliably populated for motor actuators in MJX,
+            # but data.ctrl is what we explicitly set, so this is always correct.
+            AppliedTorqueObservation(),
             ksim.SensorObservation.create(physics_model=physics_model, sensor_name="imu_acc", noise=imu_acc_noise),
             ksim.SensorObservation.create(physics_model=physics_model, sensor_name="imu_gyro", noise=imu_gyro_noise),
             ksim.ProjectedGravityObservation.create(
