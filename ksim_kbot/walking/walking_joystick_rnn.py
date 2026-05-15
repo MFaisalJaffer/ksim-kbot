@@ -615,31 +615,13 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # TV-curve saturation per step: |applied_torque| / max_tau_motoring(|qvel|),
             # averaged across motoring joints. Reports how often the policy is at the
             # velocity-dependent torque limit. >0.9 = saturating, sim-to-real warning.
-            # Raw diagnostic loggers — scale=1.0 so the value gets logged
-            # (ksim multiplies by scale before logging; scale=0 → logs 0).
-            # Excluded from the combined reward via exclude_combined_reward_components
-            # in the config below, so they don't affect training.
-            kbot_rewards.AppliedTorqueMeanReward(scale=1.0),
-            kbot_rewards.AppliedTorqueMaxReward(scale=1.0),
-            kbot_rewards.JointVelMeanReward(scale=1.0),
-            kbot_rewards.TVCurveSaturationReward(
-                scale=1.0,
-                motor_types=(
-                    "04", "04", "03", "04", "00",  # right arm
-                    "04", "04", "03", "04", "00",  # left arm
-                    "04", "04", "03", "04", "02",  # right leg
-                    "04", "04", "03", "04", "02",  # left leg
-                ),
-            ),
-            kbot_rewards.TVCurvePeakSaturationReward(
-                scale=1.0,
-                motor_types=(
-                    "04", "04", "03", "04", "00",
-                    "04", "04", "03", "04", "00",
-                    "04", "04", "03", "04", "02",
-                    "04", "04", "03", "04", "02",
-                ),
-            ),
+            # NOTE: Diagnostic loggers (TVCurveSaturationReward, AppliedTorque*,
+            # JointVelMean*) were removed. ksim's `exclude_combined_reward_components`
+            # only filters plots — rewards with scale>0 ARE used in training,
+            # which caused the policy to maximize TV saturation (= max out motors)
+            # in run_73 and tank episode length. To monitor TV/torque/velocity
+            # without affecting training, use a post-hoc analysis script that
+            # loads a checkpoint and runs an eval rollout.
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
@@ -922,15 +904,5 @@ if __name__ == "__main__":
             gait_freq_upper=1.5,
             reward_clip_min=0.0,
             reward_clip_max=1000.0,
-            # Diagnostic loggers — scale=1.0 so they actually log non-zero
-            # values, but excluded from combined reward so they don't influence
-            # training. (ksim multiplies reward by scale before logging.)
-            exclude_combined_reward_components=[
-                "applied_torque_mean_reward",
-                "applied_torque_max_reward",
-                "joint_vel_mean_reward",
-                "tvcurve_saturation_reward",
-                "tvcurve_peak_saturation_reward",
-            ],
         ),
     )
