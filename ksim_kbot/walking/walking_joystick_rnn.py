@@ -153,8 +153,10 @@ class KbotRNNActor(eqx.Module):
         joint_targets_arm = jnp.array(JOINT_TARGETS[:10])
         pos_delta_arm_constrained = target_arm_pose - joint_targets_arm  # (10,)
 
-        mean = dist_n.mean()                                            # (40,)
-        std = dist_n.stddev()                                           # (40,)
+        # distrax.Normal stores parameters directly as .loc and .scale attributes
+        # (note: .mean() / .stddev() methods may not exist depending on version).
+        mean = dist_n.loc                                               # (40,)
+        std = dist_n.scale                                              # (40,)
         # Mask broadcasts: 1 when constrained, 0 when free
         mask = (is_constrained > 0.5).astype(mean.dtype)
         small_std = jnp.full((10,), 0.05, dtype=std.dtype)
