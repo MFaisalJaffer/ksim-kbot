@@ -141,20 +141,24 @@ def _build_tv_curve_arrays(motor_types: tuple[str, ...]) -> tuple[Array, Array]:
 class TVCurveMITActuators(TargetPositionMITActuators):
     """MIT-mode actuator with velocity-dependent torque limit (T-V curve).
 
-    Real BLDC motors cannot deliver peak torque at high speeds — back-EMF reduces
-    available torque as the motor spins faster. Modelling this in sim closes a
-    major sim-to-real gap: in stock-sim the policy learns gaits that demand peak
-    torque even at high joint velocities, which the real hardware physically
-    cannot deliver.
+    Real BLDC motors cannot deliver peak motoring torque at high speeds — back-EMF
+    reduces available torque as the motor spins in the same direction the torque is
+    applied. Braking torque (opposite direction to ω) is NOT limited by back-EMF;
+    the motor regenerates instead and can apply nearly full peak torque to brake.
 
-    Per-joint behavior:
-      max_tau(omega) = interp(|qvel|, omega_curve_joint, tau_curve_joint)
-      ctrl_clipped   = clip(ctrl, -max_tau, +max_tau)
+    Per-joint behavior (per-step):
+      max_tau_motoring = interp(|qvel|, omega_curve, tau_curve)
+      max_tau_braking  = ctrl_clip                         # constant (thermal/current)
+      effective_limit  = where(sign(ctrl) == sign(qvel), max_tau_motoring, max_tau_braking)
+      ctrl_clipped     = clip(ctrl, -effective_limit, +effective_limit)
 
-    Randomization: at every step, each joint's TV curve tau values are scaled by
-    a random factor in [1 - tv_curve_randomization, 1.0]. Real motors degrade
-    when hot (torque dips), so we only ever scale DOWN, never up. This regularizes
-    the policy against over-reliance on exact peak torque.
+    This direction-aware clipping lets the policy use strong braking torque (which
+    real hardware can deliver) while still respecting the motoring-side T-V curve.
+
+    Randomization: at every step, each joint's max_tau_motoring is scaled by a
+    random factor in [1 - tv_curve_randomization, 1.0]. Real motors degrade when
+    hot (torque dips), so we only ever scale DOWN, never up. Regularizes against
+    over-reliance on exact peak torque.
     """
 
     def __init__(
@@ -227,9 +231,14 @@ class TVCurveMITActuators(TargetPositionMITActuators):
         ctrl = self.kps * pos_delta + self.kds * vel_delta
         ctrl = self.add_noise(self.torque_noise, self.torque_noise_type, ctrl, tor_rng)
 
-        # Velocity-dependent torque limit, then hard safety clip.
-        max_tau = self._max_tau(current_vel, tv_rng)
-        ctrl = jnp.clip(ctrl, -max_tau, max_tau)
+        # Direction-aware T-V limit:
+        #   motoring (sign(ctrl)==sign(qvel)): limit by interpolated T-V curve
+        #   braking  (opposite signs):         no back-EMF limit, use full ctrl_clip
+        max_tau_motoring = self._max_tau(current_vel, tv_rng)  # (num_joints,)
+        is_motoring = ctrl * current_vel > 0.0  # both nonzero and same sign
+        effective_limit = jnp.where(is_motoring, max_tau_motoring, self.ctrl_clip)
+        ctrl = jnp.clip(ctrl, -effective_limit, effective_limit)
+        # Hard safety clip on top — never exceed the constant ctrl_clip in either direction.
         ctrl = jnp.clip(ctrl, -self.ctrl_clip, self.ctrl_clip)
         return ctrl
 

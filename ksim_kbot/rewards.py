@@ -696,6 +696,55 @@ class FeetPhaseReward(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class FootAirTimeReward(ksim.Reward):
+    """Dense reward for getting an entire foot off the ground when commanded to walk.
+
+    Bootstrap reward to push the policy out of "both feet planted" local optima.
+    Unlike FeetPhaseReward (which requires matching the gait clock) and
+    WalkingPostureReward (which requires bent knees AND lift simultaneously),
+    this just rewards lifting any foot at any time during a walking command.
+
+    "Entire foot off the ground" is enforced by checking the minimum z across
+    three points per foot (heel, center, toe) — same multi-point check as the
+    FootSwingClearancePenalty. This prevents the tilt-exploit where the toe is
+    high but the heel still touches.
+
+    Per-foot reward is a sigmoid: 0 when min_z < threshold, 1 when min_z is well
+    above. Maximum reward per step = 2 (both feet airborne, never wanted long-term
+    but useful early). Only active when commanded to walk.
+    """
+
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    feet_endpoints_obs_name: str = attrs.field(default="feet_endpoints_observation")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+    stand_still_threshold: float = attrs.field(default=0.1)
+    height_threshold: float = attrs.field(default=0.03)  # ~1.2 in — small lift counts
+    sensitivity: float = attrs.field(default=0.02)        # sigmoid steepness
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        # Per-foot minimum z across heel + center + toe (entire foot must be up).
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]
+        center_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)
+        ep = trajectory.obs[self.feet_endpoints_obs_name]
+        left_min_z  = jnp.minimum(ep[..., 2],  ep[..., 5])
+        right_min_z = jnp.minimum(ep[..., 8],  ep[..., 11])
+        endpoint_min_z = jnp.stack([left_min_z, right_min_z], axis=-1)
+        foot_min_z = jnp.minimum(center_z, endpoint_min_z)  # (T, 2)
+
+        # Smooth indicator: ~0 when at/below threshold, ~1 well above.
+        in_air = jax.nn.sigmoid((foot_min_z - self.height_threshold) / self.sensitivity)
+        reward = jnp.sum(in_air, axis=-1)  # 0..2
+
+        # Only active when commanded to walk.
+        vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
+        ang_vel_cmd = trajectory.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([vel_cmd, ang_vel_cmd], axis=-1), axis=-1)
+        is_walking = cmd_norm > self.stand_still_threshold
+        return reward * is_walking
+
+
+@attrs.define(frozen=True, kw_only=True)
 class FootSwingClearancePenalty(ksim.Reward):
     """Penalize foot dragging during swing phase.
 

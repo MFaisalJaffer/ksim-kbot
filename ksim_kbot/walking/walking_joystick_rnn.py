@@ -477,12 +477,11 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 linvel_obs_name="base_linear_velocity_observation",
             ),
             kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
-            # Scale reduced 50→15: previous setting dominated training and policy
-            # converged to a "stand still forever" local optimum, never learning to walk.
-            # 15 keeps the standing anchor present but lets velocity-tracking signal win
-            # when commanded to move.
+            # Scale reduced 50→15→8: previous values still dominated. With air-time
+            # reward added, the standing anchor needs to be even lighter so walking
+            # signals win the gradient race when commanded to move.
             kbot_rewards.StandStillReward(
-                scale=15.0,
+                scale=8.0,
                 sensitivity=0.3,  # was 0.05 — wider basin lets robot shift weight to balance
                 # Orientation gate: reward drops when leaning so it doesn't fight
                 # against recovery foot steps. At ~15° lean the reward is ~10%.
@@ -549,6 +548,16 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 max_foot_height=0.12,
                 sensitivity=0.01,
                 ctrl_dt=self.config.ctrl_dt,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            # Dense bootstrap reward to break the "both feet planted" attractor.
+            # Rewards getting an entire foot off the ground (heel + center + toe all
+            # above 3cm) when commanded to walk. Ungated by gait clock — any lift counts.
+            # Once stepping emerges, the gait rewards take over to shape proper alternation.
+            kbot_rewards.FootAirTimeReward(
+                scale=1.0,
+                height_threshold=0.03,
+                sensitivity=0.02,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
             # Penalize foot dragging during swing phase. Threshold lowered 0.08→0.04
