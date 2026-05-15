@@ -51,15 +51,16 @@ JOINT_TARGETS = (
     # maintain "equilibrium". Bootstraps walking via instability.
     # Phase-2 (after walking emerges): swap to all-zeros JOINT_TARGETS (straight
     # legs, flat feet) so the policy can finally learn to stand still.
-    # hip_pitch=0 because the L/R hip_pitch sign convention is asymmetric in this
-    # MJCF — non-zero values create body twist instead of symmetric back-lean.
-    0.0,      # hip_pitch
+    # hip_pitch uses MIRRORED signs (-0.23 right, +0.23 left) — verified that
+    # this produces symmetric ~13° torso back-lean, not asymmetric twist (the
+    # L/R sign convention here is intentional in the URDF).
+    -0.23,    # hip_pitch — slight back-lean
     0.0,      # hip_roll
     0.0,      # hip_yaw
     -0.873,   # knee — deep bend (~50°)
     +0.195,   # ankle — under-compensates knee → toe-up / heel-strike pose
     # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle (mirrored signs)
-    0.0,      # hip_pitch
+    +0.23,    # hip_pitch — mirrored back-lean
     0.0,      # hip_roll
     0.0,      # hip_yaw
     +0.873,   # knee
