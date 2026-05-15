@@ -745,6 +745,40 @@ class FootAirTimeReward(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class AppliedTorqueMeanReward(ksim.Reward):
+    """Diagnostic (scale=0): mean |applied_torque| across joints per step.
+    Used to verify the applied_torque_observation is non-zero."""
+
+    actuator_force_obs_name: str = attrs.field(default="applied_torque_observation")
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        ctrl = trajectory.obs[self.actuator_force_obs_name]
+        return jnp.mean(jnp.abs(ctrl), axis=-1)
+
+
+@attrs.define(frozen=True, kw_only=True)
+class AppliedTorqueMaxReward(ksim.Reward):
+    """Diagnostic (scale=0): max |applied_torque| across joints per step."""
+
+    actuator_force_obs_name: str = attrs.field(default="applied_torque_observation")
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        ctrl = trajectory.obs[self.actuator_force_obs_name]
+        return jnp.max(jnp.abs(ctrl), axis=-1)
+
+
+@attrs.define(frozen=True, kw_only=True)
+class JointVelMeanReward(ksim.Reward):
+    """Diagnostic (scale=0): mean |joint_velocity| across joints per step."""
+
+    joint_velocity_obs_name: str = attrs.field(default="joint_velocity_observation")
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        vel = trajectory.obs[self.joint_velocity_obs_name]
+        return jnp.mean(jnp.abs(vel), axis=-1)
+
+
+@attrs.define(frozen=True, kw_only=True)
 class TVCurveSaturationReward(ksim.Reward):
     """Diagnostic logger (scale=0): mean motoring-side T-V saturation per step.
 

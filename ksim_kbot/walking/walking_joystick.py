@@ -42,21 +42,28 @@ JOINT_TARGETS = (
     -1.4,
     0.0,
     # right leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
-    # "Ready to walk" stance: slight knee bend with OPPOSITE-SIGN ankle compensation
-    # to keep the foot perfectly flat. Verified by forward-kinematics: heel + center +
-    # toe all land at z = 0.0205m (same height). The sign relationship is empirical —
-    # right knee = -0.1 needs right ankle = +0.1; left knee = +0.1 needs left ankle = -0.1.
-    0.0,    # hip_pitch
-    0.0,    # hip_roll
-    0.0,    # hip_yaw
-    -0.1,   # knee — slight bend (~5.7°)
-    +0.1,   # ankle — opposite-sign compensation keeps foot flat
-    # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle (mirror of right)
-    0.0,    # hip_pitch
-    0.0,    # hip_roll
-    0.0,    # hip_yaw
-    +0.1,   # knee — slight bend (~5.7°)
-    -0.1,   # ankle — opposite-sign compensation keeps foot flat
+    # "Unstable ready pose" — deep knee bend with UNDER-COMPENSATED ankle creates
+    # a heel-strike pose (heel down, toe up — verified via forward-kinematics:
+    # heel z≈+0.04m, toe z≈+0.146m). The pose is statically unstable: when
+    # gravity pulls down, only the heel touches and the body tips backward, so
+    # holding the pose statically isn't viable. StandStillReward keeps pulling
+    # the policy toward this unstable target → the policy discovers stepping to
+    # maintain "equilibrium". Bootstraps walking via instability.
+    # Phase-2 (after walking emerges): swap to all-zeros JOINT_TARGETS (straight
+    # legs, flat feet) so the policy can finally learn to stand still.
+    # hip_pitch=0 because the L/R hip_pitch sign convention is asymmetric in this
+    # MJCF — non-zero values create body twist instead of symmetric back-lean.
+    0.0,      # hip_pitch
+    0.0,      # hip_roll
+    0.0,      # hip_yaw
+    -0.873,   # knee — deep bend (~50°)
+    +0.195,   # ankle — under-compensates knee → toe-up / heel-strike pose
+    # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle (mirrored signs)
+    0.0,      # hip_pitch
+    0.0,      # hip_roll
+    0.0,      # hip_yaw
+    +0.873,   # knee
+    -0.195,   # ankle
 )
 
 

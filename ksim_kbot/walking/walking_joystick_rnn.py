@@ -615,6 +615,10 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # TV-curve saturation per step: |applied_torque| / max_tau_motoring(|qvel|),
             # averaged across motoring joints. Reports how often the policy is at the
             # velocity-dependent torque limit. >0.9 = saturating, sim-to-real warning.
+            # Raw diagnostic loggers — verify input observations are non-zero
+            kbot_rewards.AppliedTorqueMeanReward(scale=0.0),
+            kbot_rewards.AppliedTorqueMaxReward(scale=0.0),
+            kbot_rewards.JointVelMeanReward(scale=0.0),
             kbot_rewards.TVCurveSaturationReward(
                 scale=0.0,
                 motor_types=(
