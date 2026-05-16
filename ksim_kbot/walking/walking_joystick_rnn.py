@@ -561,21 +561,20 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 velocity_match_sensitivity=0.25,
                 linvel_obs_name="base_linear_velocity_observation",
             ),
-            # Reward bent knees when walking (straight knees already rewarded by StandStillReward).
-            # Target: ~0.4 rad (~23°) bend each knee when cmd is active.
+            # Progressive bent-knee + foot-clearance reward.
+            # Sigmoid signals start firing at small bends/lifts and grow as the
+            # policy bends knees more AND lifts feet higher. Both required
+            # (multiplicative gate) so the policy is incentivized to bend knees
+            # AND lift feet together. Bigger bends + bigger lifts = bigger reward.
             kbot_rewards.WalkingPostureReward(
                 scale=2.0,
-                min_knee_bend=0.4,   # ~23° — must be meaningfully bent when walking
-                sensitivity=0.05,
+                knee_half_bend=0.1,        # ~5.7° — half reward here, grows up to ~0.3 rad
+                knee_sensitivity=0.05,
+                clearance_half_lift=0.02,  # ~2cm — half reward here, grows up to ~6cm
+                clearance_sensitivity=0.02,
                 stand_still_threshold=self.config.stand_still_threshold,
-                # Gate: only reward bent knees if feet are also being lifted.
-                # Lowered 0.08→0.04 (~1.5") so the signal pays out earlier — robot can
-                # start earning the bent-knee bonus from small foot lifts and grow into
-                # the full 8cm clearance over training.
-                min_clearance=0.04,
                 max_foot_height=0.12,
                 ctrl_dt=self.config.ctrl_dt,
-                clearance_sensitivity=0.02,
             ),
             # Penalty for NOT cycling feet when commanded to move (complement of FeetPhaseReward).
             # Carrot + stick: FeetPhaseReward rewards correct gait, this penalizes incorrect gait.
@@ -597,12 +596,13 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 sensitivity=0.02,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
-            # Penalize foot dragging during swing phase. Threshold lowered 0.08→0.04
-            # to align with WalkingPostureReward — once the robot can lift to 4cm we
-            # can revisit raising both thresholds together.
+            # Penalize foot dragging during swing phase. Threshold matches
+            # WalkingPostureReward's clearance_half_lift (2cm) so reward and
+            # penalty are aligned — feet below 2cm during swing get penalized,
+            # feet above 2cm earn the posture reward.
             kbot_rewards.FootSwingClearancePenalty(
                 scale=-2.0,
-                min_clearance=0.04,
+                min_clearance=0.02,
                 max_foot_height=0.12,
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,

@@ -926,24 +926,26 @@ class FootSwingClearancePenalty(ksim.Reward):
 
 @attrs.define(frozen=True, kw_only=True)
 class WalkingPostureReward(ksim.Reward):
-    """Reward minimum knee bend AND foot clearance when commanded to walk.
+    """Progressive reward for bent knees AND lifted feet when commanded to walk.
 
-    Requires knees to be bent at least min_knee_bend radians, but does NOT
-    prescribe a specific target angle — the policy is free to discover the
-    natural varying bend through the gait cycle.
+    Both signals are SIGMOIDS that start paying out at small bends/lifts and
+    grow smoothly as the policy bends more and lifts higher. Reward saturates
+    near the "good walking" values (knee_full_bend, clearance_full_lift) but
+    starts firing from tiny values so the policy gets a usable gradient from
+    a straight-legged starting point.
 
-    Reward = knee_bend_reward × foot_clearance_gate × is_walking
+    Reward = knee_growth × foot_lift_growth × is_walking
 
-    - knee_bend_reward: 1.0 when both knees exceed min_knee_bend, decays
-      smoothly to 0 when knees are straight. No penalty for bending MORE.
-    - foot_clearance_gate: mean compliance across feet during swing phase.
-      For each foot in swing (ideal_z > 0), compliance = sigmoid of how far
-      foot_z is above min_clearance. During stance, contributes 1.0.
+    - knee_growth: sigmoid((|knee| - knee_half_bend) / knee_sensitivity), per
+      knee, multiplied across both legs. Half-reward at knee_half_bend,
+      saturates around knee_full_bend.
+    - foot_lift_growth: mean across feet during swing — sigmoid of (foot_z -
+      clearance_half_lift) / clearance_sensitivity. Stance feet contribute 1.0.
     """
 
-    # Minimum required knee bend — reward is full above this, decays below.
-    min_knee_bend: float = attrs.field(default=0.4)   # ~23°, must be meaningfully bent when walking
-    sensitivity: float = attrs.field(default=0.05)   # how sharply reward falls below min_bend
+    # Knee bend curve — sigmoid centered at knee_half_bend
+    knee_half_bend: float = attrs.field(default=0.1)   # ~5.7° — half reward here
+    knee_sensitivity: float = attrs.field(default=0.05)  # sigmoid steepness for knee bend
     linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
     angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
     stand_still_threshold: float = attrs.field(default=0.1)
@@ -954,10 +956,15 @@ class WalkingPostureReward(ksim.Reward):
     feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
     feet_endpoints_obs_name: str = attrs.field(default="feet_endpoints_observation")
     gait_freq_cmd_name: str = attrs.field(default="gait_frequency_command")
-    min_clearance: float = attrs.field(default=0.08)   # ~3 inches
+    clearance_half_lift: float = attrs.field(default=0.02)  # half reward at 2cm lift
     max_foot_height: float = attrs.field(default=0.12)
     ctrl_dt: float = attrs.field(default=0.02)
-    clearance_sensitivity: float = attrs.field(default=0.02)  # sigmoid steepness for clearance gate
+    clearance_sensitivity: float = attrs.field(default=0.02)  # sigmoid steepness for foot lift
+
+    # Legacy fields kept for backwards compatibility with existing call sites.
+    min_knee_bend: float = attrs.field(default=0.0)
+    sensitivity: float = attrs.field(default=0.0)
+    min_clearance: float = attrs.field(default=0.0)
 
     def get_reward(self, trajectory: ksim.Trajectory) -> Array:
         vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
@@ -966,14 +973,13 @@ class WalkingPostureReward(ksim.Reward):
         is_walking = cmd_norm > self.stand_still_threshold
 
         # Right knee bends negative, left knee bends positive (robot convention).
-        # Use absolute value — we only care that the knee IS bent, not how much.
         r_knee = trajectory.qpos[..., 7 + self.right_knee_idx]
         l_knee = trajectory.qpos[..., 7 + self.left_knee_idx]
 
-        # Shortfall = how far below min_bend each knee is (0 if already bent enough).
-        r_shortfall = jnp.maximum(0.0, self.min_knee_bend - jnp.abs(r_knee))
-        l_shortfall = jnp.maximum(0.0, self.min_knee_bend - jnp.abs(l_knee))
-        knee_match = jnp.exp(-(r_shortfall + l_shortfall) / self.sensitivity)
+        # Sigmoid growth: ~0 at zero bend, 0.5 at knee_half_bend, saturates ~1.
+        r_growth = jax.nn.sigmoid((jnp.abs(r_knee) - self.knee_half_bend) / self.knee_sensitivity)
+        l_growth = jax.nn.sigmoid((jnp.abs(l_knee) - self.knee_half_bend) / self.knee_sensitivity)
+        knee_match = r_growth * l_growth
 
         # Foot clearance gate: only give reward if feet are also being lifted.
         # Compute gait clock phase for each foot (left=0, right=π offset).
@@ -1004,7 +1010,7 @@ class WalkingPostureReward(ksim.Reward):
         foot_z = jnp.minimum(center_z, endpoint_min_z)
 
         in_swing = ideal_z > 0.0
-        clearance_diff = (foot_z - self.min_clearance) / self.clearance_sensitivity
+        clearance_diff = (foot_z - self.clearance_half_lift) / self.clearance_sensitivity
         clearance_compliance = jax.nn.sigmoid(clearance_diff)
         gate_per_foot = jnp.where(in_swing, clearance_compliance, 1.0)
         foot_clearance_gate = jnp.mean(gate_per_foot, axis=-1)
