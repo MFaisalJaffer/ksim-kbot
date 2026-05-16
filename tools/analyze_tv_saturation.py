@@ -188,8 +188,8 @@ def analyze(ckpt_path: str, vx: float, vy: float, wz: float, n_steps: int) -> No
     sat = np.where(is_motoring, np.abs(ctrls) / (max_tau + 1e-6), np.nan)
 
     # Per-joint stats.
-    print(f"{'#':<3} {'Joint':<11} {'Mot':<5} {'mean':>6} {'p50':>6} {'p90':>6} {'p99':>6} {'max':>6} {'% > 0.9':>8}")
-    print("-" * 72)
+    print(f"{'#':<3} {'Joint':<11} {'Mot':<5} {'mean':>6} {'p50':>6} {'p90':>6} {'p99':>6} {'max':>6} {'% > 0.85':>9} {'% > 0.9':>8}")
+    print("-" * 84)
     for j in range(N):
         s = sat[:, j]
         s = s[~np.isnan(s)]
@@ -198,14 +198,15 @@ def analyze(ckpt_path: str, vx: float, vy: float, wz: float, n_steps: int) -> No
             continue
         mean = s.mean(); p50 = np.percentile(s, 50); p90 = np.percentile(s, 90)
         p99 = np.percentile(s, 99); mx = s.max()
-        pct_pegged = (s > 0.9).mean() * 100.0
-        print(f"{j:<3} {JOINT_NAMES[j]:<11} {MOTOR_TYPES[j]:<5} {mean:>6.3f} {p50:>6.3f} {p90:>6.3f} {p99:>6.3f} {mx:>6.3f} {pct_pegged:>7.2f}%")
+        pct_85 = (s > 0.85).mean() * 100.0
+        pct_90 = (s > 0.9).mean() * 100.0
+        print(f"{j:<3} {JOINT_NAMES[j]:<11} {MOTOR_TYPES[j]:<5} {mean:>6.3f} {p50:>6.3f} {p90:>6.3f} {p99:>6.3f} {mx:>6.3f} {pct_85:>8.2f}% {pct_90:>7.2f}%")
 
     # Overall summary.
     overall = sat[~np.isnan(sat)]
     print()
     print(f"OVERALL: mean={overall.mean():.3f}  p90={np.percentile(overall, 90):.3f}  max={overall.max():.3f}  "
-          f"% > 0.9: {(overall > 0.9).mean()*100:.2f}%")
+          f"% > 0.85: {(overall > 0.85).mean()*100:.2f}%  % > 0.9: {(overall > 0.9).mean()*100:.2f}%")
 
     # Per-group breakdown.
     print("\nPer-group (mean saturation):")
@@ -222,7 +223,9 @@ def analyze(ckpt_path: str, vx: float, vy: float, wz: float, n_steps: int) -> No
         if len(s) == 0:
             print(f"  {name:<12}  (no motoring)")
         else:
-            print(f"  {name:<12}  mean={s.mean():.3f}  max={s.max():.3f}  % > 0.9: {(s > 0.9).mean()*100:.2f}%")
+            print(f"  {name:<12}  mean={s.mean():.3f}  max={s.max():.3f}"
+                  f"  % > 0.85: {(s > 0.85).mean()*100:.2f}%"
+                  f"  % > 0.9: {(s > 0.9).mean()*100:.2f}%")
 
 
 def main():
