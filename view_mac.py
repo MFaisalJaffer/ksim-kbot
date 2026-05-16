@@ -148,6 +148,30 @@ def key_callback(keycode: int, scancode: int = 0, action: int = 1, mods: int = 0
 import ksim  # noqa: E402  (import after env vars)
 
 
+# ── Host callbacks to read live keyboard state from inside JAX-traced code ───
+# Without these, `task.step_engine` traces each Command.__call__ once and
+# captures _CMD values as Python constants. Subsequent _CMD updates from
+# key_callback wouldn't propagate into the traced function, so the commands
+# would freeze at whatever _CMD held on the first call.
+#
+# jax.pure_callback forces JAX to call back into Python each step to fetch the
+# live values, side-stepping the closure-capture problem.
+
+def _read_vel_cmd():
+    return np.array([_CMD["vx"], _CMD["vy"]], dtype=np.float32)
+
+
+def _read_ang_cmd():
+    return np.array([_CMD["wz"]], dtype=np.float32)
+
+
+def _read_arm_cmd():
+    return np.concatenate(
+        [np.array([_CMD["is_constrained"]], dtype=np.float32),
+         np.array(_CMD["arm_target"], dtype=np.float32)]
+    )
+
+
 @attrs.define(frozen=True, kw_only=True)
 class KeyboardLinearVelocityCommand(ksim.Command):
     """Linear velocity command driven by keyboard state."""
@@ -155,10 +179,15 @@ class KeyboardLinearVelocityCommand(ksim.Command):
     def get_name(self) -> str:
         return "linear_velocity_command"
 
+    def _build(self) -> Array:
+        return jax.pure_callback(
+            _read_vel_cmd, jax.ShapeDtypeStruct((2,), jnp.float32),
+        )
+
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
     ) -> Array:
-        return jnp.array([_CMD["vx"], _CMD["vy"]])
+        return self._build()
 
     def __call__(
         self,
@@ -167,7 +196,7 @@ class KeyboardLinearVelocityCommand(ksim.Command):
         curriculum_level: Array,
         rng: PRNGKeyArray,
     ) -> Array:
-        return jnp.array([_CMD["vx"], _CMD["vy"]])
+        return self._build()
 
 
 @attrs.define(frozen=True, kw_only=True)
@@ -177,10 +206,15 @@ class KeyboardAngularVelocityCommand(ksim.Command):
     def get_name(self) -> str:
         return "angular_velocity_command"
 
+    def _build(self) -> Array:
+        return jax.pure_callback(
+            _read_ang_cmd, jax.ShapeDtypeStruct((1,), jnp.float32),
+        )
+
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
     ) -> Array:
-        return jnp.array([_CMD["wz"]])
+        return self._build()
 
     def __call__(
         self,
@@ -189,23 +223,25 @@ class KeyboardAngularVelocityCommand(ksim.Command):
         curriculum_level: Array,
         rng: PRNGKeyArray,
     ) -> Array:
-        return jnp.array([_CMD["wz"]])
+        return self._build()
 
 
 @attrs.define(frozen=True, kw_only=True)
 class KeyboardArmConstraintCommand(ksim.Command):
     """Arm constraint command driven by keyboard state.
 
-    Reads `is_constrained` flag and the current `arm_target` 10-vector from the
-    global _CMD dict and returns the 11-dim command the policy expects.
+    Reads `is_constrained` flag and the current `arm_target` 10-vector from
+    the global _CMD dict via jax.pure_callback so that toggling state via key
+    press (T) and changing presets (1-6) is picked up by the traced step
+    function each step.
     """
 
     def get_name(self) -> str:
         return "arm_constraint_command"
 
     def _build_cmd(self) -> Array:
-        return jnp.concatenate(
-            [jnp.array([_CMD["is_constrained"]]), jnp.array(_CMD["arm_target"])]
+        return jax.pure_callback(
+            _read_arm_cmd, jax.ShapeDtypeStruct((11,), jnp.float32),
         )
 
     def initial_command(
