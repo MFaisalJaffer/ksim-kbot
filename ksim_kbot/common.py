@@ -87,36 +87,41 @@ class TargetPositionMITActuators(ksim.PositionVelocityActuator):
 # omega in rad/s, tau in Nm. Sourced from the actuator datasheets.
 # At a given joint speed |omega|, the motor can deliver at most tau(|omega|) Nm.
 # Above the no-load speed, tau = 0 (motor cannot produce torque at all).
+#
+# ALL TAU VALUES SCALED BY 0.85 from the original datasheet to bake in a
+# 15% sim-to-real safety margin. The policy will never see more torque than
+# 85% of the spec'd peak, so when deployed on real motors (where degradation
+# from heat/wear can easily exceed 15%) it has known headroom. Combined with
+# the per-step `tv_curve_randomization` of ±15%, effective torque seen during
+# training is in [0.72×, 0.85×] of the cold-motor spec.
 TV_CURVES: dict[str, dict[str, tuple[float, ...]]] = {
-    # GIM_8108_8 — used for robstride_04 (high-torque joints: shoulder pitch/roll, elbow,
-    # hip pitch/roll, knee). 22 Nm peak, no-load speed ~21.5 rad/s.
+    # GIM_8108_8 — used for robstride_04. Spec peak 22 Nm; 0.85× = 18.7 Nm.
     "04": {
-        "omega": (0.0,  7.9,  9.9, 10.5, 11.5, 12.0, 13.1, 14.1,
-                  15.2, 15.7, 16.8, 17.8, 18.3, 18.8, 19.4, 19.9,
-                  20.9, 21.5),
-        "tau":   (22.0, 21.0, 20.0, 19.0, 17.0, 15.0, 14.0, 12.0,
-                  10.0,  9.0,  7.5,  6.0,  5.0,  4.0,  3.0,  2.0,
-                   1.0,  0.0),
+        "omega": (0.0,    7.9,   9.9,   10.5,  11.5,  12.0,  13.1,  14.1,
+                  15.2,   15.7,  16.8,  17.8,  18.3,  18.8,  19.4,  19.9,
+                  20.9,   21.5),
+        "tau":   (18.70, 17.85, 17.00, 16.15, 14.45, 12.75, 11.90, 10.20,
+                   8.50,  7.65,  6.375, 5.10,  4.25,  3.40,  2.55,  1.70,
+                   0.85,  0.0),
     },
-    # GIM_6010_8 — used for robstride_03 (shoulder yaw, hip yaw) and robstride_02 (ankle).
-    # 11 Nm peak, no-load speed ~29.8 rad/s.
+    # GIM_6010_8 — robstride_03 (shoulder yaw, hip yaw). Spec peak 11 Nm; 0.85× = 9.35 Nm.
     "03": {
-        "omega": (0.0,  3.1,  4.7, 12.0, 14.1, 16.2, 18.3, 19.9,
-                  21.5, 23.0, 24.6, 25.7, 27.2, 29.8),
-        "tau":   (11.0, 10.5, 10.0,  9.7,  9.0,  8.0,  7.0,  6.0,
-                   5.0,  4.0,  3.0,  2.0,  1.1,  0.0),
+        "omega": (0.0,    3.1,   4.7,   12.0,  14.1,  16.2,  18.3,  19.9,
+                  21.5,   23.0,  24.6,  25.7,  27.2,  29.8),
+        "tau":   ( 9.35,  8.925, 8.50,  8.245, 7.65,  6.80,  5.95,  5.10,
+                   4.25,  3.40,  2.55,  1.70,  0.935, 0.0),
     },
-    # Same motor as "03".
+    # Same motor as "03" — robstride_02 (ankle).
     "02": {
-        "omega": (0.0,  3.1,  4.7, 12.0, 14.1, 16.2, 18.3, 19.9,
-                  21.5, 23.0, 24.6, 25.7, 27.2, 29.8),
-        "tau":   (11.0, 10.5, 10.0,  9.7,  9.0,  8.0,  7.0,  6.0,
-                   5.0,  4.0,  3.0,  2.0,  1.1,  0.0),
+        "omega": (0.0,    3.1,   4.7,   12.0,  14.1,  16.2,  18.3,  19.9,
+                  21.5,   23.0,  24.6,  25.7,  27.2,  29.8),
+        "tau":   ( 9.35,  8.925, 8.50,  8.245, 7.65,  6.80,  5.95,  5.10,
+                   4.25,  3.40,  2.55,  1.70,  0.935, 0.0),
     },
-    # "00" wrist motor — TV curve unavailable, treat as constant 5 Nm (matches MAX_TORQUE).
+    # "00" wrist motor — TV curve unavailable, 5 Nm constant × 0.85 = 4.25 Nm.
     "00": {
-        "omega": (0.0, 100.0),
-        "tau":   (5.0,   5.0),
+        "omega": (0.0,  100.0),
+        "tau":   (4.25,   4.25),
     },
 }
 
