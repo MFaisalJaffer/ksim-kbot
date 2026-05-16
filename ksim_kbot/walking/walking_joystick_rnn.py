@@ -621,6 +621,13 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 height_threshold=0.025,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
+            # Soft penalty for feet getting too close (crossing/brushing). Pairs with
+            # the MJCF foot-foot collision (option A) — collision is the hard backstop,
+            # this gives a smooth gradient to keep them separated under normal walking.
+            kbot_rewards.FootProximityPenalty(
+                scale=-2.0,
+                min_distance=0.10,
+            ),
             # NOTE: ArmConstraintReward removed. With the actor-side action
             # override (forward() replaces arm action when is_constrained=1),
             # the arms are externally controlled and always match the target.

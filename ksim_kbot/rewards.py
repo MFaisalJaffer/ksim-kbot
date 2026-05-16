@@ -860,6 +860,29 @@ class TVCurvePeakSaturationReward(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class FootProximityPenalty(ksim.Reward):
+    """Penalty for feet being too close horizontally — discourages crossing/brushing.
+
+    Uses `feet_position_observation` (site center xy) and penalizes the
+    shortfall below `min_distance`. Complements the new physical foot-foot
+    collision in the MJCF — collision triggers on actual overlap, this fires
+    earlier and gives a continuous gradient away from proximity.
+    """
+
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    min_distance: float = attrs.field(default=0.10)   # ~10cm — narrower than hip width
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]
+        left_xy = foot_pos[..., 0:2]
+        right_xy = foot_pos[..., 3:5]
+        dist = jnp.linalg.norm(left_xy - right_xy, axis=-1)
+        shortfall = jnp.maximum(0.0, self.min_distance - dist)
+        # Quadratic penalty: smooth gradient, no plateau
+        return jnp.square(shortfall)
+
+
+@attrs.define(frozen=True, kw_only=True)
 class StandStillFootLiftPenalty(ksim.Reward):
     """Penalize lifting feet when commanded to stand still.
 
