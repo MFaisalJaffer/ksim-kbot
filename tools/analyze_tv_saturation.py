@@ -19,7 +19,14 @@ Output:
 """
 
 import os
-os.environ.setdefault("MUJOCO_GL", "egl")
+# Pick a MUJOCO_GL default based on platform if the user hasn't set one.
+# We never actually render in this script, but `import mujoco` validates the
+# value and errors if it's set to a backend not available on the platform.
+# - Linux servers: egl (headless) is the typical default.
+# - macOS: only glfw is supported.
+if "MUJOCO_GL" not in os.environ:
+    import sys as _sys
+    os.environ["MUJOCO_GL"] = "glfw" if _sys.platform == "darwin" else "egl"
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 import argparse
@@ -55,19 +62,19 @@ def build_constant_command(value: jnp.ndarray, name: str) -> "type":
 
     @attrs.define(frozen=True, kw_only=True)
     class _Const(ksim.Command):
-        _name: str = attrs.field()
-        _value: tuple = attrs.field()
+        cmd_name: str = attrs.field()
+        cmd_value: tuple = attrs.field()
 
         def get_name(self) -> str:
-            return self._name
+            return self.cmd_name
 
         def initial_command(self, physics_data, curriculum_level, rng):
-            return jnp.array(self._value)
+            return jnp.array(self.cmd_value)
 
         def __call__(self, prev_command, physics_data, curriculum_level, rng):
-            return jnp.array(self._value)
+            return jnp.array(self.cmd_value)
 
-    return _Const(_name=name, _value=tuple(np.array(value).tolist()))
+    return _Const(cmd_name=name, cmd_value=tuple(np.array(value).tolist()))
 
 
 def analyze(ckpt_path: str, vx: float, vy: float, wz: float, n_steps: int) -> None:
