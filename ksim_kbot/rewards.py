@@ -860,6 +860,47 @@ class TVCurvePeakSaturationReward(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class StandStillFootLiftPenalty(ksim.Reward):
+    """Penalize lifting feet when commanded to stand still.
+
+    Mirror of FootAirTimeReward — but for the stand-still case. When the velocity
+    command is near zero, the policy should keep feet planted. This penalty fires
+    proportionally to how much each foot is lifted above `height_threshold`.
+
+    Uses multi-point clearance check (heel + center + toe) so a tilt exploit
+    (lifting toe up but keeping heel down) still gets penalized correctly.
+    """
+
+    feet_pos_obs_name: str = attrs.field(default="feet_position_observation")
+    feet_endpoints_obs_name: str = attrs.field(default="feet_endpoints_observation")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+    stand_still_threshold: float = attrs.field(default=0.1)
+    height_threshold: float = attrs.field(default=0.025)  # ~1 inch — small tolerance
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        # Per-foot min z (across heel + center + toe).
+        foot_pos = trajectory.obs[self.feet_pos_obs_name]
+        center_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)
+        ep = trajectory.obs[self.feet_endpoints_obs_name]
+        left_min_z  = jnp.minimum(ep[..., 2],  ep[..., 5])
+        right_min_z = jnp.minimum(ep[..., 8],  ep[..., 11])
+        endpoint_min_z = jnp.stack([left_min_z, right_min_z], axis=-1)
+        foot_min_z = jnp.minimum(center_z, endpoint_min_z)  # (T, 2)
+
+        # Lift above tolerance per foot (positive when above), summed.
+        lift_above = jnp.maximum(0.0, foot_min_z - self.height_threshold)
+        penalty = jnp.sum(lift_above, axis=-1)
+
+        # Only active when commanded to stand still.
+        vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
+        ang_vel_cmd = trajectory.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([vel_cmd, ang_vel_cmd], axis=-1), axis=-1)
+        is_standing = cmd_norm < self.stand_still_threshold
+        return penalty * is_standing
+
+
+@attrs.define(frozen=True, kw_only=True)
 class FootSwingClearancePenalty(ksim.Reward):
     """Penalize foot dragging during swing phase.
 

@@ -517,15 +517,21 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
             # Scale reduced 50→15→8: previous values still dominated. With air-time
             # reward added, the standing anchor needs to be even lighter so walking
             # signals win the gradient race when commanded to move.
+            # StandStillReward targets a STRAIGHT-LEG pose (all-zero legs), NOT
+            # the bent-knee JOINT_TARGETS used by the actuator/PD. This decouples:
+            #   - Walking (cmd > threshold): bootstrap pose from JOINT_TARGETS pulls
+            #     toward bent-knee → drives stepping via instability
+            #   - Standing (cmd ≈ 0): this reward pulls toward straight legs, the
+            #     stable "human-like" stand pose
+            # Arms target the same JOINT_TARGETS arm portion (elbows ±1.4).
             kbot_rewards.StandStillReward(
                 scale=8.0,
-                sensitivity=0.3,  # was 0.05 — wider basin lets robot shift weight to balance
-                # Orientation gate: reward drops when leaning so it doesn't fight
-                # against recovery foot steps. At ~15° lean the reward is ~10%.
+                sensitivity=0.3,
                 orientation_sensitivity=0.05,
                 linear_velocity_cmd_name="linear_velocity_command",
                 angular_velocity_cmd_name="angular_velocity_command",
-                joint_targets=JOINT_TARGETS,
+                # Custom stand target: arms from JOINT_TARGETS[:10], legs all zeros (straight).
+                joint_targets=JOINT_TARGETS[:10] + (0.0,) * 10,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
             kbot_rewards.JointPositionLimitPenalty.create(
@@ -605,6 +611,14 @@ class KbotWalkingJoystickRNNTask(KbotWalkingTask[Config], Generic[Config]):
                 min_clearance=0.02,
                 max_foot_height=0.12,
                 ctrl_dt=self.config.ctrl_dt,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            # Explicit penalty for lifting feet when commanded to stand still.
+            # Mirror of FootAirTimeReward — only active when cmd_norm < threshold.
+            # Helps stop the policy from "marching in place" during stand commands.
+            kbot_rewards.StandStillFootLiftPenalty(
+                scale=-3.0,
+                height_threshold=0.025,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
             # NOTE: ArmConstraintReward removed. With the actor-side action
