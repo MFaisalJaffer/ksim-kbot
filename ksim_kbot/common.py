@@ -631,35 +631,51 @@ class ArmConstraintCommand(ksim.Command):
     constraint_prob: float = attrs.field(default=0.3)
     sample_ranges: tuple[tuple[float, float], ...] = attrs.field(default=ARM_SAMPLE_RANGES)
     # Curriculum-gating: effective constraint prob = constraint_prob * curriculum_level.
-    # Disabled until the policy can sustain reasonable episodes; ramps in linearly with
-    # curriculum level (0 → 1), reaching the full constraint_prob only at level 1.
     use_curriculum: bool = attrs.field(default=True)
+    # Delayed activation: the constraint is scheduled at episode start but the
+    # arm override only fires after t > activation_delay. Lets the policy
+    # establish steady walking BEFORE the arms suddenly swing to their
+    # target — so the legs experience a clear "arm motion" perturbation during
+    # active walking, which is what we want them to learn to counteract.
+    # Set to 0.0 to disable (constraint active from t=0 if sampled).
+    activation_delay: float = attrs.field(default=2.0)
+
+    # Slot 0 encoding:
+    #   0.0  = no constraint this episode (no override, ever)
+    #  -1.0  = constraint scheduled, currently in delay (no override yet)
+    #  +1.0  = constraint currently active (actor applies arm override)
+    # The actor's gate `is_constrained > 0.5` treats {0.0, -1.0} as off and +1.0 as on.
 
     def initial_command(
         self, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
     ) -> Array:
         rng_flag, rng_pose = jax.random.split(rng)
-        # Scale constraint probability by curriculum level so basic walking is
-        # learned first (level 0 → no arm constraint), then arm tracking phases
-        # in as the policy gets stable (level 1 → full constraint_prob).
         effective_prob = jnp.where(
             self.use_curriculum,
             self.constraint_prob * curriculum_level,
             self.constraint_prob,
         )
-        is_constrained = jax.random.bernoulli(rng_flag, effective_prob).astype(jnp.float32)
-        # Sample each arm joint uniformly within its allowed range.
+        will_constrain = jax.random.bernoulli(rng_flag, effective_prob).astype(jnp.float32)
+        # Encode: -1 if will activate (currently in delay), 0 if no constraint this episode.
+        marker_init = jnp.where(will_constrain > 0.5, -1.0, 0.0)
         mins = jnp.array([r[0] for r in self.sample_ranges])
         maxs = jnp.array([r[1] for r in self.sample_ranges])
         u = jax.random.uniform(rng_pose, shape=(len(self.sample_ranges),))
         target_pose = mins + u * (maxs - mins)
-        return jnp.concatenate([is_constrained[None], target_pose], axis=-1)
+        return jnp.concatenate([marker_init[None], target_pose], axis=-1)
 
     def __call__(
         self, prev_command: Array, physics_data: ksim.PhysicsData, curriculum_level: Array, rng: PRNGKeyArray
     ) -> Array:
-        # No mid-episode switching — the constraint is fixed for the whole episode.
-        return prev_command
+        # Promote scheduled (-1) → active (+1) once t > activation_delay.
+        # Other states stay as-is (no constraint → stays 0; active → stays +1).
+        marker = prev_command[0]
+        target_pose = prev_command[1:11]
+        is_scheduled = marker < -0.5
+        delay_elapsed = physics_data.time > self.activation_delay
+        promote = is_scheduled & delay_elapsed
+        new_marker = jnp.where(promote, 1.0, marker)
+        return jnp.concatenate([new_marker[None], target_pose], axis=-1)
 
 
 @attrs.define(frozen=True, kw_only=True)

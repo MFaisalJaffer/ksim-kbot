@@ -42,23 +42,23 @@ JOINT_TARGETS = (
     -1.4,
     0.0,
     # right leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
-    # **Phase-2 stable pose** — all zeros for legs = straight legs, flat feet.
-    # The unstable bootstrap pose (knee=-0.873, ankle=+0.195) was used in
-    # runs 71–74 to drive walking discovery via instability. Now that the
-    # policy has learned to step, we switch to this stable target so
-    # StandStillReward can actually pay out and the policy learns to stand
-    # still when commanded to.
-    0.0,    # hip_pitch
-    0.0,    # hip_roll
-    0.0,    # hip_yaw
-    0.0,    # knee
-    0.0,    # ankle
-    # left leg
-    0.0,    # hip_pitch
-    0.0,    # hip_roll
-    0.0,    # hip_yaw
-    0.0,    # knee
-    0.0,    # ankle
+    # **Dynamic-walking bootstrap pose** — deep knee bend + under-compensated
+    # ankle creates a heel-strike pose that's statically unstable, forcing the
+    # policy to step. Matches run_74's setup which produced 60s episode lengths.
+    # FK-verified: heel z ≈ +0.04m, toe z ≈ +0.146m.
+    # Static standing will be re-tuned later with a flat-foot target — for now
+    # we're focusing on getting dynamic walking solid.
+    -0.23,    # hip_pitch — slight back-lean (mirrored sign for L/R)
+    0.0,      # hip_roll
+    0.0,      # hip_yaw
+    -0.873,   # knee — deep bend (~50°)
+    +0.195,   # ankle — under-compensates → toe-up / heel-strike pose
+    # left leg: mirrored signs
+    +0.23,    # hip_pitch
+    0.0,      # hip_roll
+    0.0,      # hip_yaw
+    +0.873,   # knee
+    -0.195,   # ankle
 )
 
 
