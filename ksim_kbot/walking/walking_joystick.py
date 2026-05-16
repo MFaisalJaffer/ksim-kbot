@@ -42,29 +42,23 @@ JOINT_TARGETS = (
     -1.4,
     0.0,
     # right leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
-    # "Unstable ready pose" — deep knee bend with UNDER-COMPENSATED ankle creates
-    # a heel-strike pose (heel down, toe up — verified via forward-kinematics:
-    # heel z≈+0.04m, toe z≈+0.146m). The pose is statically unstable: when
-    # gravity pulls down, only the heel touches and the body tips backward, so
-    # holding the pose statically isn't viable. StandStillReward keeps pulling
-    # the policy toward this unstable target → the policy discovers stepping to
-    # maintain "equilibrium". Bootstraps walking via instability.
-    # Phase-2 (after walking emerges): swap to all-zeros JOINT_TARGETS (straight
-    # legs, flat feet) so the policy can finally learn to stand still.
-    # hip_pitch uses MIRRORED signs (-0.23 right, +0.23 left) — verified that
-    # this produces symmetric ~13° torso back-lean, not asymmetric twist (the
-    # L/R sign convention here is intentional in the URDF).
-    -0.23,    # hip_pitch — slight back-lean
-    0.0,      # hip_roll
-    0.0,      # hip_yaw
-    -0.873,   # knee — deep bend (~50°)
-    +0.195,   # ankle — under-compensates knee → toe-up / heel-strike pose
-    # left leg: hip_pitch, hip_roll, hip_yaw, knee, ankle (mirrored signs)
-    +0.23,    # hip_pitch — mirrored back-lean
-    0.0,      # hip_roll
-    0.0,      # hip_yaw
-    +0.873,   # knee
-    -0.195,   # ankle
+    # **Phase-2 stable pose** — all zeros for legs = straight legs, flat feet.
+    # The unstable bootstrap pose (knee=-0.873, ankle=+0.195) was used in
+    # runs 71–74 to drive walking discovery via instability. Now that the
+    # policy has learned to step, we switch to this stable target so
+    # StandStillReward can actually pay out and the policy learns to stand
+    # still when commanded to.
+    0.0,    # hip_pitch
+    0.0,    # hip_roll
+    0.0,    # hip_yaw
+    0.0,    # knee
+    0.0,    # ankle
+    # left leg
+    0.0,    # hip_pitch
+    0.0,    # hip_roll
+    0.0,    # hip_yaw
+    0.0,    # knee
+    0.0,    # ankle
 )
 
 
