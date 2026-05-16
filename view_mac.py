@@ -45,13 +45,25 @@ from jaxtyping import Array, PRNGKeyArray
 # ── Arm pose presets ─────────────────────────────────────────────────────────
 # Each entry is a 10-vector: right arm (shoulder_pitch, shoulder_roll, shoulder_yaw,
 # elbow, wrist) then left arm in the same order.
+#
+# Sign convention for symmetric L/R poses (verified via forward kinematics):
+#   - shoulder_pitch: R=negative, L=positive for FORWARD; opposite for backward
+#   - shoulder_roll:  R=negative, L=positive for OUT to side; opposite for in
+#   - elbow:          R=positive, L=negative for BENT INWARD
+#   - shoulder_yaw, wrist: same sign for both
 ARM_PRESETS = {
-    1: ("neutral default",       ( 0.0, 0.0, 0.0,  1.4, 0.0,    0.0, 0.0, 0.0, -1.4, 0.0)),
-    2: ("carry box (arms fwd)",  ( 1.2, 0.3, 0.0,  1.8, 0.0,    1.2,-0.3, 0.0, -1.8, 0.0)),
-    3: ("arms down at sides",    ( 0.0, 0.0, 0.0,  0.2, 0.0,    0.0, 0.0, 0.0, -0.2, 0.0)),
-    4: ("arms overhead",         (-2.0, 0.0, 0.0,  0.4, 0.0,   -2.0, 0.0, 0.0, -0.4, 0.0)),
-    5: ("right hand up (wave)",  (-1.8, 0.3, 0.0,  1.2, 0.0,    0.0, 0.0, 0.0, -1.4, 0.0)),
-    6: ("arms at chest (tray)",  ( 0.6, 0.2, 0.0,  2.0, 0.0,    0.6,-0.2, 0.0, -2.0, 0.0)),
+    1: ("default (matches JOINT_TARGETS)",
+        ( 0.0,  0.0, 0.0,  1.4, 0.0,    0.0, 0.0, 0.0, -1.4, 0.0)),
+    2: ("carry box (arms fwd, elbow 90°)",
+        (-1.0,  0.0, 0.0,  1.0, 0.0,   +1.0, 0.0, 0.0, -1.0, 0.0)),
+    3: ("arms straight down at sides",
+        ( 0.0,  0.0, 0.0,  0.0, 0.0,    0.0, 0.0, 0.0,  0.0, 0.0)),
+    4: ("arms overhead (raised up)",
+        (-2.5,  0.0, 0.0,  0.5, 0.0,   +2.5, 0.0, 0.0, -0.5, 0.0)),
+    5: ("wave (right hand raised, left default)",
+        (-2.5,  0.0, 0.0,  0.5, 0.0,    0.0, 0.0, 0.0, -1.4, 0.0)),
+    6: ("T-pose (arms out to sides)",
+        ( 0.0, -1.5, 0.0,  0.0, 0.0,    0.0,+1.5, 0.0,  0.0, 0.0)),
 }
 
 # ── Global keyboard command state ────────────────────────────────────────────
