@@ -283,6 +283,13 @@ class SingleFootContactReward(ksim.StatefulReward):
     ctrl_dt: float = 0.02
     grace_period: float = 0.2  # seconds
     contact_threshold: float = 0.1
+    # BUGFIX: was hardcoded 1e-3 — caused the reward to fire during the
+    # "gray-zone" command sampling region (cmd_norm in [1e-3, stand_still_threshold])
+    # where every other reward considers the robot to be standing.  The policy
+    # learned to march in place during these small-cmd episodes because being on
+    # one foot was net-positive (+0.5 here, partially offset by foot-lift penalty).
+    # Now configurable and should be set to match the task's stand_still_threshold.
+    stand_still_threshold: float = attrs.field(default=1e-3)
     feet_contact_obs_name: str = attrs.field(default="feet_contact_observation")
     linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
     angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
@@ -299,7 +306,7 @@ class SingleFootContactReward(ksim.StatefulReward):
         lin_cmd = traj.command[self.linear_velocity_cmd_name]
         ang_cmd = traj.command[self.angular_velocity_cmd_name]
         cmd_norm = jnp.linalg.norm(jnp.concatenate([lin_cmd, ang_cmd], axis=-1), axis=-1)
-        is_zero_cmd = cmd_norm < 1e-3
+        is_zero_cmd = cmd_norm < self.stand_still_threshold
 
         def _body(time_since_single_contact: Array, inputs: tuple[Array, Array]) -> tuple[Array, Array]:
             is_single, is_zero = inputs

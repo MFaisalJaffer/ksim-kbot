@@ -328,19 +328,27 @@ class KbotLegsWalkingTask(KbotStandingTask[Config], Generic[Config]):
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
-        if self.config.domain_randomize:
-            return [
-                common.XYPushEvent(
-                    interval_range=(2.0, 4.0),
-                    force_range=(0.0, 1.8),
-                ),
-                common.TorquePushEvent(
-                    interval_range=(2.0, 4.0),
-                    ang_vel_range=(0.0, 1.8),
-                ),
-            ]
-        else:
-            return []
+        # PUSHES TEMPORARILY DISABLED for walking-bootstrap phase.
+        # Run_14 diagnosis: curriculum auto-advanced pushes to 35% while the
+        # policy was still in a defensive crouch local minimum.  Pushes were
+        # punishing the exploration needed to discover walking.  Re-enable
+        # once linear_velocity_tracking_reward > 0.5 (raw) sustained — at
+        # that point the policy has learned to walk and can withstand
+        # progressive perturbations.
+        return []
+        # if self.config.domain_randomize:
+        #     return [
+        #         common.XYPushEvent(
+        #             interval_range=(2.0, 4.0),
+        #             force_range=(0.0, 1.8),
+        #         ),
+        #         common.TorquePushEvent(
+        #             interval_range=(2.0, 4.0),
+        #             ang_vel_range=(0.0, 1.8),
+        #         ),
+        #     ]
+        # else:
+        #     return []
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> Curriculum:
         return ksim.EpisodeLengthCurriculum(
