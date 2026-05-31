@@ -817,140 +817,38 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
         )
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
-        # SIMPLIFIED REWARD SET (rework after run_14/15/16 diagnosis):
-        # Each behavioral goal has ONE primary reward, no redundancy.
-        # Dropped: WalkingPostureReward (multiplicative gate = chicken-and-egg),
-        # SingleFootContactReward, FootAirTimeReward, MarchInPlacePenalty,
-        # NoContactPenalty, FeetPhasePenalty, FootSwingClearancePenalty,
-        # KneeRangeOfMotion, SteppingGatedVelocityReward.  Their gates and
-        # signals were all redundantly measuring "is the policy walking?"
-        # which the MotionTrackingReward already does.
+        # ─── PORTED FROM kbot_walking_joystick_rnntask/run_36 (May 9) ───
+        # Goal: test whether the joystick task's working reward structure
+        # also drives walking on the legs-only (no-arms) robot. This is an
+        # A/B against the DeepMimic-style stack (runs 17–20) which had
+        # MotionTracking@10 + symmetry + bent-knee + foot-lift + KneeMotionPenalty.
+        # That stack produced symmetric joints but persistent foot-lift
+        # asymmetry and weak forward translation. run_36's stack relies on
+        # StandStillReward@50 as the dominant anchor + FeetPhaseReward@2.1
+        # (gait phase clock) + SingleFootContact + MarchInPlacePenalty.
+        #
+        # Legs-only adaptations (vs run_36):
+        #   - JointDeviationPenalty: 10 weights instead of 20 (no arms)
+        #   - HipDeviationPenalty: _04 suffix on roll, _03 on yaw (legs MJCF)
+        # Everything else is verbatim from run_36 (scales, signs, gating).
+        #
+        # Note: events (FixedXYPushEvent) and curriculum unchanged from our
+        # legs task — this is a rewards-only port.
         return [
-            # ───────── STANDING-ONLY (cmd_norm < 0.1) ─────────
-            # Bumped scale 4.0 -> 8.0 to make the stand-still attractor
-            # strongly defined.  Reduces ambiguity at the stand-vs-walk
-            # boundary and gives the policy a clear target during low-cmd.
-            kbot_rewards.StandStillReward(
-                scale=8.0,
-                sensitivity=0.3,
-                orientation_sensitivity=0.05,
-                linear_velocity_cmd_name="linear_velocity_command",
-                angular_velocity_cmd_name="angular_velocity_command",
-                joint_targets=JOINT_TARGETS,
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            # Bumped scale -3.0 -> -5.0.  Marching-in-place during stand
-            # commands should be strongly punished now that the bug-fix on
-            # SingleFootContactReward gating is in place.
-            kbot_rewards.StandStillFootLiftPenalty(
-                scale=-5.0,
-                height_threshold=0.025,
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-
-            # ───────── WALKING-ONLY (cmd_norm > 0.1) ─────────
-            # PRIMARY walking driver — DeepMimic-style imitation reward.
-            # Scale boosted 4.0 -> 10.0 so this dominates the walking-mode
-            # signal budget.  sigma=1.5 stays forgiving so it provides
-            # meaningful gradient even when policy is far from reference.
-            MotionTrackingReward(
-                scale=10.0,
-                ctrl_dt=self.config.ctrl_dt,
-                sigma=1.5,
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            # Plain velocity tracking (NOT stepping-gated).  Pairs with the
-            # pushes (re-enabled below) to give the policy a smooth gradient
-            # toward forward progress.  Pushes force stepping; this reward
-            # ensures the steps go in the commanded direction.
-            kbot_rewards.LinearVelocityTrackingReward(
-                scale=5.0,
-                error_scale=0.5,
-                linvel_obs_name="base_linear_velocity_observation",
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            kbot_rewards.AngularVelocityTrackingReward(
-                scale=2.0,
-                angvel_obs_name="base_angular_velocity_observation",
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            # Secondary smooth-gradient signals.  These pay out for partial
-            # progress (any knee bend / any foot lift), giving the policy
-            # exploration credit before it can produce a full gait cycle.
-            BentKneeReward(
-                scale=2.0,
-                right_knee_idx=3,
-                left_knee_idx=8,
-                knee_half_bend=0.1,
-                knee_sensitivity=0.05,
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            # Boosted scale 2.0 -> 4.0 AND half_lift 0.03 -> 0.05.
-            # Visual diagnosis from run_17: policy converged to a "tiny in-place
-            # shuffle" exploit — feet lifting 1-2cm only, which produced no
-            # reward AND no penalty (below the 3cm half-lift threshold).  Raising
-            # the threshold means tiny shuffles count as "not lifted" while real
-            # steps (>5cm) get the boosted reward.
-            FootLiftReward(
-                scale=4.0,
-                ctrl_dt=self.config.ctrl_dt,
-                half_lift=0.05,
-                sensitivity=0.02,
-                max_foot_height=0.12,
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            # KneeMotionWithoutProgressPenalty replaces the broken MarchInPlacePenalty.
-            # Diagnosis: the policy is doing "knee gait in place" — knees oscillate
-            # like walking but feet stay planted.  MarchInPlace required feet ABOVE
-            # 4cm to fire (the foot center height threshold) — but the exploit
-            # keeps feet on the ground.  Empirically MarchInPlace registered
-            # exactly 0.0000 during run_18.  This new penalty uses knee bend as
-            # the activity signal instead of foot height.
-            #
-            # Penalty math:  max(|r_knee|, |l_knee|)/0.1 × (1 - vel_match_exp) × cmd_active
-            # At 0.3 m/s commanded, 0 actual, ~0.3 rad knee bend: penalty ≈ 0.59
-            # With scale -2.0: -1.18/step — strong enough to deter the exploit.
-            KneeMotionWithoutProgressPenalty(
-                scale=-2.0,
-                right_knee_idx=3,
-                left_knee_idx=8,
-                knee_motion_threshold=0.1,
-                velocity_match_sensitivity=0.1,
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            # Phase consistency reward — keeps feet in sync with gait clock.
-            kbot_rewards.FeetPhaseReward(
-                foot_default_height=0.04,
-                max_foot_height=0.12,
-                scale=2.0,
-                stand_still_threshold=self.config.stand_still_threshold,
-                translation_gated=True,
-                translation_gate_sensitivity=0.05,
-                linvel_obs_name="base_linear_velocity_observation",
-            ),
-
-            # ───────── ALWAYS-ON SAFETY / REGULARIZATION ─────────
-            kbot_rewards.OrientationPenalty(scale=-5.0),
-            kbot_rewards.AngularVelocityXYPenalty(
-                scale=-0.15,
-                angvel_obs_name="base_angular_velocity_observation",
-                stand_still_threshold=0.0,
-            ),
-            # Bumped termination penalty -1.0 -> -3.0 to make falling more costly
-            # relative to the bigger reward magnitudes.
-            kbot_rewards.TerminationPenalty(scale=-3.0),
-            # Weak joint-pose anchor.  Hip pitch / knee / ankle weights 0.01
-            # are essentially noise — allows free leg movement.  Hip roll/yaw
-            # at 0.3 keeps those joints from drifting (HipDeviationPenalty
-            # below is the real anchor for them).
+            # JointDeviationPenalty (run_36 verbatim, arms stripped):
+            # Knees + hip_pitch + ankles free (weight 0.01); hip_roll/yaw
+            # constrained (1.0). Anchors stable upper-leg-body pose.
             kbot_rewards.JointDeviationPenalty(
                 scale=-0.1,
                 joint_targets=JOINT_TARGETS,
                 joint_weights=(
-                    0.01, 0.3, 0.3, 0.01, 0.01,  # right leg
-                    0.01, 0.3, 0.3, 0.01, 0.01,  # left leg
+                    # right leg: hip_pitch, hip_roll, hip_yaw, knee, ankle
+                    0.01, 1.0, 1.0, 0.01, 0.01,
+                    # left leg
+                    0.01, 1.0, 1.0, 0.01, 0.01,
                 ),
             ),
+            # HipDeviationPenalty: legs MJCF uses _04 suffix on hip_roll, _03 on hip_yaw.
             kbot_rewards.HipDeviationPenalty.create(
                 physics_model=physics_model,
                 hip_names=(
@@ -962,15 +860,51 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
                 joint_targets=JOINT_TARGETS,
                 scale=-0.10,
             ),
+            kbot_rewards.TerminationPenalty(scale=-1.0),
+            kbot_rewards.OrientationPenalty(scale=-2.0),
+            kbot_rewards.LinearVelocityTrackingReward(
+                scale=1.0,
+                linvel_obs_name="base_linear_velocity_observation",
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            kbot_rewards.AngularVelocityTrackingReward(
+                scale=0.5,
+                angvel_obs_name="base_angular_velocity_observation",
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            kbot_rewards.AngularVelocityXYPenalty(
+                scale=-0.15,
+                angvel_obs_name="base_angular_velocity_observation",
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            # FeetPhaseReward @ 2.1, translation_gated so marching-in-place
+            # doesn't farm phase reward without forward progress.
+            kbot_rewards.FeetPhaseReward(
+                foot_default_height=0.04,
+                max_foot_height=0.12,
+                scale=2.1,
+                stand_still_threshold=self.config.stand_still_threshold,
+                translation_gated=True,
+                translation_gate_sensitivity=0.25,
+                linvel_obs_name="base_linear_velocity_observation",
+            ),
+            kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
+            # StandStillReward @ 50 — the dominant attractor for cmd_norm < threshold.
+            # This is the run_36 design's heaviest hand: idle stand pose
+            # gets +50, so the policy strongly defaults to standing when
+            # not commanded to walk. Pairs with FeetPhase + SingleFoot
+            # which only fire under non-zero commands.
+            kbot_rewards.StandStillReward(
+                scale=50.0,
+                linear_velocity_cmd_name="linear_velocity_command",
+                angular_velocity_cmd_name="angular_velocity_command",
+                joint_targets=JOINT_TARGETS,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
             kbot_rewards.JointPositionLimitPenalty.create(
                 physics_model=physics_model,
                 soft_limit_factor=0.95,
                 scale=-1.0,
-            ),
-            kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
-            kbot_rewards.FootProximityPenalty(
-                scale=-2.0,
-                min_distance=0.06,
             ),
             kbot_rewards.ContactForcePenalty(
                 scale=-0.01,
@@ -982,19 +916,32 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
             ksim.CtrlPenalty(scale=-0.005),
             ksim.ActionAccelerationPenalty(scale=-0.005),
             ksim.JointVelocityPenalty(scale=-0.005),
-            # (Legs-only task: ArmConstraintReward, ArmConstraintCommand, and
-            #  actor arm-override are all gone — no arms on this robot.)
-            # ── Diagnostic logger (scale=0, does not affect training) ──
-            # TV-curve saturation per step: |applied_torque| / max_tau_motoring(|qvel|),
-            # averaged across motoring joints. Reports how often the policy is at the
-            # velocity-dependent torque limit. >0.9 = saturating, sim-to-real warning.
-            # NOTE: Diagnostic loggers (TVCurveSaturationReward, AppliedTorque*,
-            # JointVelMean*) were removed. ksim's `exclude_combined_reward_components`
-            # only filters plots — rewards with scale>0 ARE used in training,
-            # which caused the policy to maximize TV saturation (= max out motors)
-            # in run_73 and tank episode length. To monitor TV/torque/velocity
-            # without affecting training, use a post-hoc analysis script that
-            # loads a checkpoint and runs an eval rollout.
+            kbot_rewards.KneeRangeOfMotion.create(
+                physics_model=physics_model,
+                knee_names=("dof_left_knee_04", "dof_right_knee_04"),
+            ),
+            # SingleFootContactReward @ 0.5, grace_period 0.2s.
+            # Pays out when exactly one foot is in contact while walking.
+            # Bug-fix: stand_still_threshold passed through from config so
+            # the gray-zone marching-in-place exploit (caught in legs run_13)
+            # doesn't reappear.
+            kbot_rewards.SingleFootContactReward(
+                scale=0.5,
+                ctrl_dt=self.config.ctrl_dt,
+                grace_period=0.2,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
+            kbot_rewards.NoContactPenalty(scale=-0.1),
+            # MarchInPlacePenalty @ -2: in legs run_18 this registered 0.0000
+            # because it required feet > 4cm to fire. Kept here for parity
+            # with run_36; if the policy converges to ground-level shuffling
+            # again, swap in KneeMotionWithoutProgressPenalty instead.
+            kbot_rewards.MarchInPlacePenalty(
+                scale=-2.0,
+                foot_default_height=0.04,
+                velocity_match_sensitivity=0.25,
+                linvel_obs_name="base_linear_velocity_observation",
+            ),
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
