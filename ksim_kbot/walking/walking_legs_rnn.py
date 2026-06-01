@@ -32,6 +32,7 @@ try:
 except ModuleNotFoundError:
     export = None  # type: ignore[assignment]
 
+from ksim_kbot import common
 from ksim_kbot import rewards as kbot_rewards
 from ksim_kbot.walking.walking_legs import (
     NUM_CRITIC_INPUTS,
@@ -1050,39 +1051,37 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
         ]
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
-        # Override parent (walking_legs.py disables pushes entirely).
-        # Re-enable small FIXED-magnitude pushes that bypass curriculum scaling
-        # so they fire from step 0.  The pushes are the structural fix for the
-        # chicken-and-egg trap diagnosed across run_14/15/16: the policy never
-        # voluntarily lifted a foot, so it never experienced stepping, so the
-        # gradient toward stepping was zero.  Periodic small XY velocity nudges
-        # force the policy into single-foot stance to recover — generating the
-        # training data needed to learn stepping.
-        #
-        # Range 0.3-0.6 m/s (bumped from 0.2-0.4): visual diagnosis from
-        # run_17 showed the policy absorbing small pushes with a "tiny in-place
-        # shuffle" rather than taking real recovery steps.  Larger pushes force
-        # bigger recoveries.  Still small enough not to throw the robot off.
+        # Curriculum-gated pushes (matches run_36 design).
+        # Both events multiply their magnitude by `curriculum_level` internally,
+        # so at level 0 (fresh policy) pushes are ZERO. Once the policy can
+        # sustain `increase_threshold` episodes, the curriculum advances and
+        # pushes grow proportionally.
+        # force_range and ang_vel_range here are the *full-strength* values at
+        # curriculum_level=1.0; intermediate levels scale linearly.
         return [
-            FixedXYPushEvent(
+            common.XYPushEvent(
                 interval_range=(2.0, 4.0),
-                force_range=(0.3, 0.6),
+                force_range=(0.0, 1.8),
+            ),
+            common.TorquePushEvent(
+                interval_range=(2.0, 4.0),
+                ang_vel_range=(0.0, 1.8),
             ),
         ]
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         # Auto-pacing curriculum with hysteresis to prevent thrashing.
-        # - num_levels=20 → 0.05 increments (smaller jumps when bumping)
-        # - increase_threshold=60s → must sustain 60s episodes before bumping up
-        #   (was 30s; raised so policy fully masters each level before adding
-        #   difficulty — at 30s the curriculum advanced before the policy could
-        #   handle the new pushes/arm constraints layered on by the next level)
-        # - decrease_threshold=10s → only drop if episodes truly collapse
-        # The wide gap between increase/decrease thresholds creates a stable dead-zone
-        # so the policy can converge at each level instead of oscillating.
+        # - num_levels=20 → 0.05 increments
+        # - increase_threshold=120s → must sustain 2-min episodes before bumping up.
+        #   Combined with curriculum-scaled XY/Torque pushes (above), this means
+        #   pushes stay OFF until the policy can stand/walk for 120s on its own.
+        #   Then they grow gradually as the policy keeps proving stability.
+        # - decrease_threshold=10s → if pushes break the policy and episodes
+        #   collapse below 10s, curriculum backs off (level decreases, pushes
+        #   shrink) until the policy recovers.
         return ksim.EpisodeLengthCurriculum(
             num_levels=20,
-            increase_threshold=60.0,
+            increase_threshold=120.0,
             decrease_threshold=10.0,
         )
 
