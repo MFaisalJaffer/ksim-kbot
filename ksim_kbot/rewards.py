@@ -637,6 +637,13 @@ class FeetPhaseReward(ksim.Reward):
     translation_gated: bool = attrs.field(default=False)
     translation_gate_sensitivity: float = attrs.field(default=0.25)
     linvel_obs_name: str = attrs.field(default="sensor_observation_local_linvel_origin")
+    # Multi-point z measurement (defeats foot-tilt exploit).
+    # When True, foot_z = min(center, heel, toe) per foot. The policy can no
+    # longer satisfy "foot is up at z=0.12" by tilting an inside edge up while
+    # the rest of the foot stays grounded — heel or toe still on the floor
+    # zeros out the min. Requires feet_endpoints_observation to be registered.
+    use_endpoints: bool = attrs.field(default=False)
+    feet_endpoints_obs_name: str = attrs.field(default="feet_endpoints_observation")
 
     def get_reward(self, trajectory: ksim.Trajectory) -> Array:
         if self.feet_pos_obs_name not in trajectory.obs:
@@ -658,7 +665,15 @@ class FeetPhaseReward(ksim.Reward):
         # batch reward over the time dimension
         foot_pos = trajectory.obs[self.feet_pos_obs_name]
 
-        foot_z = jnp.array([foot_pos[..., 2], foot_pos[..., 5]]).T
+        if self.use_endpoints:
+            # min(center, heel, toe) per foot — tilt-proof
+            ep = trajectory.obs[self.feet_endpoints_obs_name]
+            center_z = jnp.stack([foot_pos[..., 2], foot_pos[..., 5]], axis=-1)
+            left_min_z = jnp.minimum(ep[..., 2], ep[..., 5])
+            right_min_z = jnp.minimum(ep[..., 8], ep[..., 11])
+            foot_z = jnp.minimum(center_z, jnp.stack([left_min_z, right_min_z], axis=-1))
+        else:
+            foot_z = jnp.array([foot_pos[..., 2], foot_pos[..., 5]]).T
         ideal_z = self.gait_phase(phase, swing_height=jnp.array(self.max_foot_height))
         error = jnp.sum(jnp.square(foot_z - ideal_z), axis=-1)
         reward = jnp.exp(-error / self.sensitivity)
@@ -1212,3 +1227,88 @@ class TargetHeightReward(ksim.Reward):
             xax.get_norm(error, self.norm), temp=self.temp, monotonic_fn=self.monotonic_fn
         )
         return reward_value
+
+
+def _exp_kernel_with_penalty(x: Array, scale: float, sq_scale: float, abs_scale: float) -> Array:
+    x_abs = jnp.abs(x)
+    x_sq = jnp.square(x)
+    x_exp = jnp.exp(-x_sq / (2 * scale**2))
+    return x_abs * -abs_scale + x_sq * -sq_scale + x_exp
+
+
+@attrs.define(frozen=True, kw_only=True)
+class PairwiseSymmetryReward(ksim.StatefulReward):
+    """Couples left/right joint qpos and rewards mirrored postures.
+
+    Backported from upstream kscalelabs/ksim (v0.2+) for our pinned 0.1.2.
+    With ``flipped=True``, qpos_right is negated before diffing — so
+    (left=+x, right=-x) registers as symmetric. Targets both 0 (standing)
+    and mirrored gait poses. Asymmetric one-leg-only stepping breaks the
+    L/R coupling and is penalized.
+    """
+
+    left_joint_index: int = attrs.field()
+    right_joint_index: int = attrs.field()
+    left_zero: float = attrs.field(default=0.0)
+    right_zero: float = attrs.field(default=0.0)
+    flipped: bool = attrs.field(default=False)
+    alpha: float = attrs.field(default=0.1)
+    kernel_scale: float = attrs.field(default=0.25)
+    sq_scale: float = attrs.field(default=0.1, validator=attrs.validators.gt(0.0))
+    abs_scale: float = attrs.field(default=0.1, validator=attrs.validators.gt(0.0))
+
+    def initial_carry(self, rng: PRNGKeyArray) -> Array:
+        return jnp.array([self.left_zero, self.right_zero])
+
+    def get_reward_stateful(
+        self,
+        trajectory: ksim.Trajectory,
+        reward_carry: Array,
+    ) -> tuple[Array, Array]:
+        qpos_left = trajectory.qpos[..., self.left_joint_index + 7] - self.left_zero
+        qpos_right = trajectory.qpos[..., self.right_joint_index + 7] - self.right_zero
+        if self.flipped:
+            qpos_right = -qpos_right
+
+        qpos_diff = qpos_left - qpos_right
+        lr_symmetry = _exp_kernel_with_penalty(qpos_diff, self.kernel_scale, self.sq_scale, self.abs_scale)
+
+        qpos = jnp.stack([qpos_left, qpos_right], axis=-1)
+        qpos_mean = qpos.mean(axis=-2)
+        new_reward_carry = reward_carry * (1.0 - self.alpha) + qpos_mean * self.alpha
+        self_symmetry = (qpos * -new_reward_carry[..., None, :]).sum(axis=-1)
+
+        # Upstream ksim returns dict {"lr":..., "self":...}; ksim 0.1.2's reward
+        # aggregator doesn't iterate dicts, so we sum the two components.
+        return lr_symmetry + self_symmetry, new_reward_carry
+
+    @classmethod
+    def create(
+        cls,
+        physics_model: ksim.PhysicsModel,
+        left_joint_name: str,
+        right_joint_name: str,
+        left_zero: float = 0.0,
+        right_zero: float = 0.0,
+        flipped: bool = False,
+        alpha: float = 0.1,
+        kernel_scale: float = 0.25,
+        sq_scale: float = 0.1,
+        abs_scale: float = 0.1,
+        scale: float = 1.0,
+    ) -> "PairwiseSymmetryReward":
+        joint_to_idx = get_qpos_data_idxs_by_name(physics_model)
+        left_joint_index = int(joint_to_idx[left_joint_name][0]) - 7
+        right_joint_index = int(joint_to_idx[right_joint_name][0]) - 7
+        return cls(
+            left_joint_index=left_joint_index,
+            right_joint_index=right_joint_index,
+            left_zero=left_zero,
+            right_zero=right_zero,
+            flipped=flipped,
+            alpha=alpha,
+            kernel_scale=kernel_scale,
+            sq_scale=sq_scale,
+            abs_scale=abs_scale,
+            scale=scale,
+        )

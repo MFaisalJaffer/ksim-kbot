@@ -880,6 +880,9 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
             ),
             # FeetPhaseReward @ 2.1, translation_gated so marching-in-place
             # doesn't farm phase reward without forward progress.
+            # use_endpoints=True: foot z = min(center, heel, toe) per foot.
+            # Defeats the foot-tilt exploit observed in run_22 where the policy
+            # rolled the inner edge down (tracked) while the outer edge lifted.
             kbot_rewards.FeetPhaseReward(
                 foot_default_height=0.04,
                 max_foot_height=0.12,
@@ -888,6 +891,19 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
                 translation_gated=True,
                 translation_gate_sensitivity=0.25,
                 linvel_obs_name="base_linear_velocity_observation",
+                use_endpoints=True,
+            ),
+            # FootSwingClearancePenalty: when the gait clock says foot should
+            # be airborne (ideal_z > min_clearance), penalize proportionally
+            # to how much the foot is actually below clearance. Uses the same
+            # min(center, heel, toe) measurement as FeetPhaseReward — heel or
+            # toe still on the floor = foot dragging, regardless of tilt.
+            kbot_rewards.FootSwingClearancePenalty(
+                scale=-1.0,
+                min_clearance=0.06,
+                max_foot_height=0.12,
+                ctrl_dt=self.config.ctrl_dt,
+                stand_still_threshold=self.config.stand_still_threshold,
             ),
             kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
             # StandStillReward @ 50 — the dominant attractor for cmd_norm < threshold.
