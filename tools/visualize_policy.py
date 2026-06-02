@@ -213,6 +213,23 @@ def run_rollout(
 
         left_foot_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "KB_D_501L_L_LEG_FOOT")
         right_foot_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, "KB_D_501R_R_LEG_FOOT")
+        # Foot tilt detection: read the 3 site z's per foot (center, heel, toe).
+        # tilt_range = max - min reveals foot orientation; near 0 = flat,
+        # several cm = rolled edge. Stance-phase tilt is the real tell because
+        # during swing the foot is allowed to angle for toe-off / heel-strike.
+        site_l_center = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, "left_foot")
+        site_l_heel = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, "left_foot_heel")
+        site_l_toe = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, "left_foot_toe")
+        site_r_center = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, "right_foot")
+        site_r_heel = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, "right_foot_heel")
+        site_r_toe = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SITE, "right_foot_toe")
+        foot_left_3pts = np.zeros((n_steps, 3))   # columns: [center_z, heel_z, toe_z]
+        foot_right_3pts = np.zeros((n_steps, 3))
+        # Direct foot-body orientation: foot's local Y axis points DOWN when flat.
+        # We record the world Z component of body-local Y; flat → -1, tilted → > -1.
+        # tilt_angle_rad = arccos(-y_world_z). Catches ALL tilt (pitch + roll).
+        foot_left_y_world_z = np.zeros(n_steps)
+        foot_right_y_world_z = np.zeros(n_steps)
 
         print(f"Rolling out {n_steps} steps ({duration}s at {cfg.ctrl_dt}s control)...")
         for t in range(n_steps):
@@ -227,6 +244,21 @@ def run_rollout(
             mujoco.mj_forward(mj_model, mj_data)
             foot_left_z[t] = mj_data.xpos[left_foot_id, 2]
             foot_right_z[t] = mj_data.xpos[right_foot_id, 2]
+            foot_left_3pts[t] = [
+                mj_data.site_xpos[site_l_center, 2],
+                mj_data.site_xpos[site_l_heel, 2],
+                mj_data.site_xpos[site_l_toe, 2],
+            ]
+            foot_right_3pts[t] = [
+                mj_data.site_xpos[site_r_center, 2],
+                mj_data.site_xpos[site_r_heel, 2],
+                mj_data.site_xpos[site_r_toe, 2],
+            ]
+            # xmat is shape (nbody, 9), row-major 3x3 per body. Columns of R
+            # are body-local axes in world frame; body-local Y in world = R[:, 1].
+            # Z-component of that = R[2, 1] = xmat[body_id, 7].
+            foot_left_y_world_z[t] = mj_data.xmat[left_foot_id, 7]
+            foot_right_y_world_z[t] = mj_data.xmat[right_foot_id, 7]
 
             if renderer is not None and t in snapshot_set:
                 try:
@@ -246,6 +278,10 @@ def run_rollout(
             "frames": frames,
             "foot_left_z": foot_left_z,
             "foot_right_z": foot_right_z,
+            "foot_left_3pts": foot_left_3pts,
+            "foot_right_3pts": foot_right_3pts,
+            "foot_left_y_world_z": foot_left_y_world_z,
+            "foot_right_y_world_z": foot_right_y_world_z,
             "ctrl_dt": cfg.ctrl_dt,
         }
 
@@ -312,6 +348,30 @@ def make_foot_pattern(data: dict, out: Path) -> None:
     ax.grid(alpha=0.3)
     ax.set_title("Foot center heights over time")
     plt.savefig(out / "foot_pattern.png", dpi=110, bbox_inches="tight")
+    plt.close()
+
+
+def make_foot_tilt(data: dict, out: Path) -> None:
+    """Per-foot heel/center/toe z over time + tilt range. Catches the
+    foot-roll exploit: during stance, all three lines should converge."""
+    time = data["time"]
+    l3 = data["foot_left_3pts"]
+    r3 = data["foot_right_3pts"]
+    fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    for ax, three, label in ((axes[0], l3, "left"), (axes[1], r3, "right")):
+        ax.plot(time, three[:, 1], color="C2", lw=1.3, label=f"{label} heel z")
+        ax.plot(time, three[:, 2], color="C3", lw=1.3, label=f"{label} toe z")
+        ax.plot(time, three[:, 0], color="C0", lw=1.0, alpha=0.7, label=f"{label} center z")
+        tilt = three.max(axis=1) - three.min(axis=1)
+        ax.fill_between(time, three.min(axis=1), three.max(axis=1), color="gray", alpha=0.15,
+                        label=f"tilt range (max−min)")
+        ax.axhline(0.0, color="black", lw=0.5)
+        ax.set_ylabel(f"{label} foot z (m)")
+        ax.legend(fontsize=8, ncol=4, loc="upper right")
+        ax.grid(alpha=0.3)
+    axes[0].set_title("Per-site foot heights — shaded band = max−min spread (flat foot → narrow band)")
+    axes[-1].set_xlabel("time (s)")
+    plt.savefig(out / "foot_tilt.png", dpi=110, bbox_inches="tight")
     plt.close()
 
 
@@ -384,6 +444,37 @@ def print_fingerprints(data: dict, vx: float, vy: float) -> None:
     print(f"  Foot z STD   (L/R):       {fl.std():.4f} / {fr.std():.4f}")
     print(f"  Stepping symmetry:        {symmetry:.2f}   (1.0 = perfectly symmetric, 0 = one foot planted)")
     print()
+    # Foot-flatness fingerprints. Two complementary signals:
+    #   1. Pitch tilt: |heel_z - toe_z| — front/back rocking (heel-strike, toe-off).
+    #   2. Orientation tilt: angle between foot body's bottom normal and world up.
+    #      Catches ALL tilt axes including the inner/outer roll the user observed.
+    #      Foot's local +Y is the bottom normal; flat → Y_world = (0, 0, -1).
+    l3 = data["foot_left_3pts"]
+    r3 = data["foot_right_3pts"]
+    # heel = column 1, toe = column 2 (column 0 is center, dropped — has 3.6cm baseline offset)
+    l_pitch = np.abs(l3[:, 1] - l3[:, 2])
+    r_pitch = np.abs(r3[:, 1] - r3[:, 2])
+    # Orientation tilt from horizontal, in degrees
+    l_y_wz = data["foot_left_y_world_z"]
+    r_y_wz = data["foot_right_y_world_z"]
+    l_tilt_deg = np.degrees(np.arccos(np.clip(-l_y_wz, -1.0, 1.0)))
+    r_tilt_deg = np.degrees(np.arccos(np.clip(-r_y_wz, -1.0, 1.0)))
+    # Stance = min(heel, toe) z within 3cm of floor (sites are at foot bottom, near 0 when flat)
+    stance_thresh = 0.03
+    l_min_ht = np.minimum(l3[:, 1], l3[:, 2])
+    r_min_ht = np.minimum(r3[:, 1], r3[:, 2])
+    l_stance = l_min_ht < stance_thresh
+    r_stance = r_min_ht < stance_thresh
+
+    def _mean(arr, mask):
+        return float(arr[mask].mean()) if mask.any() else float("nan")
+
+    print(f"  Pitch tilt MEAN (L/R):    {l_pitch.mean()*100:.2f} / {r_pitch.mean()*100:.2f} cm   (|heel_z − toe_z|)")
+    print(f"  Pitch tilt STANCE (L/R):  {_mean(l_pitch, l_stance)*100:.2f} / {_mean(r_pitch, r_stance)*100:.2f} cm   ← flat≈0, rocking>2cm")
+    print(f"  Orient tilt MEAN (L/R):   {l_tilt_deg.mean():.1f}° / {r_tilt_deg.mean():.1f}°   (angle of foot bottom from horizontal)")
+    print(f"  Orient tilt STANCE (L/R): {_mean(l_tilt_deg, l_stance):.1f}° / {_mean(r_tilt_deg, r_stance):.1f}°   ← flat<5°, rolled edge>15°")
+    print(f"  Stance fraction (L/R):    {100.0 * l_stance.mean():.0f}% / {100.0 * r_stance.mean():.0f}%")
+    print()
 
 
 def make_velocity_tracking(data: dict, out: Path, vx: float, vy: float) -> None:
@@ -454,6 +545,7 @@ def main():
     make_filmstrip(data, out, title)
     make_joint_traces(data, out, title)
     make_foot_pattern(data, out)
+    make_foot_tilt(data, out)
     make_base_trajectory(data, out, args.vx, args.vy)
     make_velocity_tracking(data, out, args.vx, args.vy)
     print_fingerprints(data, args.vx, args.vy)
@@ -462,6 +554,7 @@ def main():
     print(f"  filmstrip.png         — visual gait (8 side-view snapshots)")
     print(f"  joint_traces.png      — joint angles vs time")
     print(f"  foot_pattern.png      — foot heights vs time")
+    print(f"  foot_tilt.png         — heel/center/toe z + tilt range per foot")
     print(f"  base_trajectory.png   — top-down xy path")
     print(f"  velocity_tracking.png — commanded vs actual vx, vy")
 
