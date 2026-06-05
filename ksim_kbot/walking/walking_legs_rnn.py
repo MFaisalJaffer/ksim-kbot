@@ -945,8 +945,18 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
                 soft_limit_factor=0.95,
                 scale=-1.0,
             ),
+            # ContactForcePenalty — aggressively tightened after run_24 viz
+            # showed landing peaks of 423 N avg / 1091 N max (8.5× body weight).
+            # Old config (scale -0.01, threshold 350 N) made slams a 7/step
+            # rounding error vs +2.1/step FeetPhase reward across the gait
+            # cycle. New: threshold 120 N (just above body weight 128 N),
+            # scale -0.10. A 423 N landing now costs 30/step — outweighs the
+            # FeetPhase reward across multiple steps. Real-hardware reason:
+            # Robstride motors + planetary gearing tolerate ~2-3× nominal load;
+            # the 8.5× BW slams from run_24 would crack gear teeth.
             kbot_rewards.ContactForcePenalty(
-                scale=-0.01,
+                scale=-0.10,
+                max_contact_force=120.0,
                 sensor_names=(
                     "sensor_observation_left_foot_force",
                     "sensor_observation_right_foot_force",
