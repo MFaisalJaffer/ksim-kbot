@@ -905,6 +905,28 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
+            # L/R symmetry coupling: ckpt.9657 of run_23 showed the policy
+            # traded the (now-fixed) right-foot tilt asymmetry for a left-leg
+            # knee-tuck asymmetry (L knee 88° max vs R 47°). PairwiseSymmetryReward
+            # couples mirrored joints in qpos space (flipped=True so left=+x and
+            # right=-x register as symmetric). Both standing-flat-and-symmetric
+            # and proper anti-phase walking satisfy this; one-leg-dominant gait
+            # breaks it. Scale 1.5 — under FeetPhase(2.1) so it doesn't override
+            # phase tracking, but above LinVelTracking(1) so it actually bites.
+            kbot_rewards.PairwiseSymmetryReward.create(
+                physics_model=physics_model,
+                left_joint_name="dof_left_hip_pitch_04",
+                right_joint_name="dof_right_hip_pitch_04",
+                flipped=True,
+                scale=1.5,
+            ),
+            kbot_rewards.PairwiseSymmetryReward.create(
+                physics_model=physics_model,
+                left_joint_name="dof_left_knee_04",
+                right_joint_name="dof_right_knee_04",
+                flipped=True,
+                scale=1.5,
+            ),
             kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
             # StandStillReward @ 50 — the dominant attractor for cmd_norm < threshold.
             # This is the run_36 design's heaviest hand: idle stand pose
