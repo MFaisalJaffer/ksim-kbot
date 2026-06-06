@@ -457,6 +457,50 @@ class NoContactPenalty(ksim.Reward):
 
 
 @attrs.define(frozen=True, kw_only=True)
+class StanceKneeBendReward(ksim.Reward):
+    """Rewards knee bend ONLY when that foot is in stance (in contact).
+
+    Encourages shock-absorbing leg compliance: knee bent during stance
+    spreads the landing impulse over the stance duration. Per-foot gating
+    closes the swing-phase knee-tuck loophole (the run_23/24 failure mode
+    where the policy bent knees during swing and slammed feet on landing).
+
+    With this reward, knee bend ONLY pays out when the corresponding foot
+    is on the ground — making knee bend an absorption strategy, not a
+    foot-lifting strategy.
+    """
+
+    right_knee_idx: int = attrs.field(default=3)   # qpos[7+3] = right knee
+    left_knee_idx: int = attrs.field(default=8)    # qpos[7+8] = left knee
+    knee_half_bend: float = attrs.field(default=0.2)   # ~11.5° target bend
+    knee_sensitivity: float = attrs.field(default=0.05)
+    contact_threshold: float = attrs.field(default=0.1)
+    feet_contact_obs_name: str = attrs.field(default="feet_contact_observation")
+    linear_velocity_cmd_name: str = attrs.field(default="linear_velocity_command")
+    angular_velocity_cmd_name: str = attrs.field(default="angular_velocity_command")
+    stand_still_threshold: float = attrs.field(default=0.1)
+
+    def get_reward(self, trajectory: ksim.Trajectory) -> Array:
+        vel_cmd = trajectory.command[self.linear_velocity_cmd_name]
+        ang_vel_cmd = trajectory.command[self.angular_velocity_cmd_name]
+        cmd_norm = jnp.linalg.norm(jnp.concatenate([vel_cmd, ang_vel_cmd], axis=-1), axis=-1)
+        is_walking = (cmd_norm > self.stand_still_threshold).astype(jnp.float32)
+
+        feet_contact = trajectory.obs[self.feet_contact_obs_name]
+        left_contact = (feet_contact[..., 0] > self.contact_threshold).astype(jnp.float32)
+        right_contact = (feet_contact[..., 1] > self.contact_threshold).astype(jnp.float32)
+
+        r_knee = trajectory.qpos[..., 7 + self.right_knee_idx]
+        l_knee = trajectory.qpos[..., 7 + self.left_knee_idx]
+        r_growth = jax.nn.sigmoid((jnp.abs(r_knee) - self.knee_half_bend) / self.knee_sensitivity)
+        l_growth = jax.nn.sigmoid((jnp.abs(l_knee) - self.knee_half_bend) / self.knee_sensitivity)
+
+        # Per-foot gating: each side's reward requires THAT foot grounded.
+        per_foot = (r_growth * right_contact + l_growth * left_contact) / 2.0
+        return per_foot * is_walking
+
+
+@attrs.define(frozen=True, kw_only=True)
 class TerminationPenalty(ksim.Reward):
     """Penalty for termination."""
 

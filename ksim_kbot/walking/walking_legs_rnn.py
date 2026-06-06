@@ -905,6 +905,23 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
+            # BentKneeReward: rewards knee bend throughout walking — both stance
+            # (for shock absorption) and swing (for foot clearance, like real
+            # human gait with ~60° flexion at peak swing). The run_23/24
+            # failure mode (tuck-and-slam) is no longer accessible thanks to
+            # the aggressive ContactForcePenalty (-0.10, threshold 120 N) which
+            # makes slamming feet ruinously expensive. So plain knee-bend
+            # reward is safe — the policy can't solve it by tucking + slamming.
+            # knee_half_bend=0.2 rad (~11.5°) is a gentle floor; the sigmoid
+            # saturates well below the dramatic 70-90° tucks of run_23.
+            BentKneeReward(
+                scale=1.0,
+                right_knee_idx=3,
+                left_knee_idx=8,
+                knee_half_bend=0.2,
+                knee_sensitivity=0.05,
+                stand_still_threshold=self.config.stand_still_threshold,
+            ),
             # L/R symmetry coupling: ckpt.9657 of run_23 showed the policy
             # traded the (now-fixed) right-foot tilt asymmetry for a left-leg
             # knee-tuck asymmetry (L knee 88° max vs R 47°). PairwiseSymmetryReward
