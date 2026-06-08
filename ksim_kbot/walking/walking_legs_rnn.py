@@ -905,45 +905,13 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
                 ctrl_dt=self.config.ctrl_dt,
                 stand_still_threshold=self.config.stand_still_threshold,
             ),
-            # BentKneeReward: rewards knee bend throughout walking — both stance
-            # (for shock absorption) and swing (for foot clearance, like real
-            # human gait with ~60° flexion at peak swing). The run_23/24
-            # failure mode (tuck-and-slam) is no longer accessible thanks to
-            # the aggressive ContactForcePenalty (-0.10, threshold 120 N) which
-            # makes slamming feet ruinously expensive. So plain knee-bend
-            # reward is safe — the policy can't solve it by tucking + slamming.
-            # knee_half_bend=0.2 rad (~11.5°) is a gentle floor; the sigmoid
-            # saturates well below the dramatic 70-90° tucks of run_23.
-            BentKneeReward(
-                scale=1.0,
-                right_knee_idx=3,
-                left_knee_idx=8,
-                knee_half_bend=0.2,
-                knee_sensitivity=0.05,
-                stand_still_threshold=self.config.stand_still_threshold,
-            ),
-            # L/R symmetry coupling: ckpt.9657 of run_23 showed the policy
-            # traded the (now-fixed) right-foot tilt asymmetry for a left-leg
-            # knee-tuck asymmetry (L knee 88° max vs R 47°). PairwiseSymmetryReward
-            # couples mirrored joints in qpos space (flipped=True so left=+x and
-            # right=-x register as symmetric). Both standing-flat-and-symmetric
-            # and proper anti-phase walking satisfy this; one-leg-dominant gait
-            # breaks it. Scale 1.5 — under FeetPhase(2.1) so it doesn't override
-            # phase tracking, but above LinVelTracking(1) so it actually bites.
-            kbot_rewards.PairwiseSymmetryReward.create(
-                physics_model=physics_model,
-                left_joint_name="dof_left_hip_pitch_04",
-                right_joint_name="dof_right_hip_pitch_04",
-                flipped=True,
-                scale=1.5,
-            ),
-            kbot_rewards.PairwiseSymmetryReward.create(
-                physics_model=physics_model,
-                left_joint_name="dof_left_knee_04",
-                right_joint_name="dof_right_knee_04",
-                flipped=True,
-                scale=1.5,
-            ),
+            # REVERTED to run_23 reward stack for new experiment (run_27+):
+            # - BentKneeReward (added run_26): removed
+            # - PairwiseSymmetryReward x2 (added run_24): removed
+            # - ContactForcePenalty (tightened run_25): reverted to original
+            #   scale -0.01, default threshold 350 N (see below)
+            # New addition: JointAccelerationPenalty for motion smoothness
+            # (see below — added after JointVelocityPenalty).
             kbot_rewards.FeetSlipPenalty(scale=-0.25, ctrl_dt=self.config.ctrl_dt),
             # StandStillReward @ 50 — the dominant attractor for cmd_norm < threshold.
             # This is the run_36 design's heaviest hand: idle stand pose
@@ -962,18 +930,13 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
                 soft_limit_factor=0.95,
                 scale=-1.0,
             ),
-            # ContactForcePenalty — aggressively tightened after run_24 viz
-            # showed landing peaks of 423 N avg / 1091 N max (8.5× body weight).
-            # Old config (scale -0.01, threshold 350 N) made slams a 7/step
-            # rounding error vs +2.1/step FeetPhase reward across the gait
-            # cycle. New: threshold 120 N (just above body weight 128 N),
-            # scale -0.10. A 423 N landing now costs 30/step — outweighs the
-            # FeetPhase reward across multiple steps. Real-hardware reason:
-            # Robstride motors + planetary gearing tolerate ~2-3× nominal load;
-            # the 8.5× BW slams from run_24 would crack gear teeth.
+            # ContactForcePenalty — reverted to run_23 defaults for the
+            # smoothness-focused experiment (run_27+). The aggressive
+            # tightening (-0.10, 120 N) from run_25 is being replaced by
+            # a different hypothesis: smoother joint motion → softer landings
+            # as a side-effect (less velocity = less momentum to absorb).
             kbot_rewards.ContactForcePenalty(
-                scale=-0.10,
-                max_contact_force=120.0,
+                scale=-0.01,
                 sensor_names=(
                     "sensor_observation_left_foot_force",
                     "sensor_observation_right_foot_force",
@@ -982,6 +945,13 @@ class KbotLegsWalkingRNNTask(KbotLegsWalkingTask[Config], Generic[Config]):
             ksim.CtrlPenalty(scale=-0.005),
             ksim.ActionAccelerationPenalty(scale=-0.005),
             ksim.JointVelocityPenalty(scale=-0.005),
+            # JointAccelerationPenalty: penalize how fast joint velocities
+            # change (= rate of change of joint angle changes). Encourages
+            # smooth motion without slowing the gait down (unlike a stronger
+            # velocity penalty which would force the policy to move slower).
+            # Scale -0.01: moderate first try. If gait still looks jerky,
+            # bump scale; if motion becomes too sluggish, dial back.
+            ksim.JointAccelerationPenalty(scale=-0.01),
             kbot_rewards.KneeRangeOfMotion.create(
                 physics_model=physics_model,
                 knee_names=("dof_left_knee_04", "dof_right_knee_04"),
