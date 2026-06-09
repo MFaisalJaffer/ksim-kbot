@@ -33,3 +33,7 @@ experimental/
 
 # Development
 scratch/
+
+# Local-only symlink for the joystick task's full-body assets.
+# Not portable (points at /home/faisal/.kscale/...); see kscale-assets/README.md.
+ksim_kbot/kscale-assets/kbot-v2-feet
