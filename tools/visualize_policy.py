@@ -230,6 +230,20 @@ def run_rollout(
         # tilt_angle_rad = arccos(-y_world_z). Catches ALL tilt (pitch + roll).
         foot_left_y_world_z = np.zeros(n_steps)
         foot_right_y_world_z = np.zeros(n_steps)
+        # Foot contact force from site-attached force sensors (3D vector each).
+        # We log the magnitude of the full force vector; vertical component
+        # alone misses oblique impact. Robot weight ~13 kg → static dual stance
+        # ~64 N/foot, normal walking peak 130–190 N, hard slam >300 N.
+        sensor_l_force = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, "left_foot_force")
+        sensor_r_force = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_SENSOR, "right_foot_force")
+        l_force_adr = int(mj_model.sensor_adr[sensor_l_force])
+        l_force_dim = int(mj_model.sensor_dim[sensor_l_force])
+        r_force_adr = int(mj_model.sensor_adr[sensor_r_force])
+        r_force_dim = int(mj_model.sensor_dim[sensor_r_force])
+        foot_left_force = np.zeros(n_steps)   # magnitude of force vector
+        foot_right_force = np.zeros(n_steps)
+        foot_left_force_z = np.zeros(n_steps) # vertical component (signed)
+        foot_right_force_z = np.zeros(n_steps)
 
         print(f"Rolling out {n_steps} steps ({duration}s at {cfg.ctrl_dt}s control)...")
         for t in range(n_steps):
@@ -259,6 +273,15 @@ def run_rollout(
             # Z-component of that = R[2, 1] = xmat[body_id, 7].
             foot_left_y_world_z[t] = mj_data.xmat[left_foot_id, 7]
             foot_right_y_world_z[t] = mj_data.xmat[right_foot_id, 7]
+            # Force sensor vectors (3 components: Fx, Fy, Fz). Site-attached
+            # force sensors report contact force on the foot body expressed in
+            # the site's frame. We log both magnitude and signed Fz.
+            l_f = mj_data.sensordata[l_force_adr : l_force_adr + l_force_dim]
+            r_f = mj_data.sensordata[r_force_adr : r_force_adr + r_force_dim]
+            foot_left_force[t] = float(np.linalg.norm(l_f))
+            foot_right_force[t] = float(np.linalg.norm(r_f))
+            foot_left_force_z[t] = float(l_f[2])
+            foot_right_force_z[t] = float(r_f[2])
 
             if renderer is not None and t in snapshot_set:
                 try:
@@ -282,6 +305,10 @@ def run_rollout(
             "foot_right_3pts": foot_right_3pts,
             "foot_left_y_world_z": foot_left_y_world_z,
             "foot_right_y_world_z": foot_right_y_world_z,
+            "foot_left_force": foot_left_force,
+            "foot_right_force": foot_right_force,
+            "foot_left_force_z": foot_left_force_z,
+            "foot_right_force_z": foot_right_force_z,
             "ctrl_dt": cfg.ctrl_dt,
         }
 
@@ -348,6 +375,27 @@ def make_foot_pattern(data: dict, out: Path) -> None:
     ax.grid(alpha=0.3)
     ax.set_title("Foot center heights over time")
     plt.savefig(out / "foot_pattern.png", dpi=110, bbox_inches="tight")
+    plt.close()
+
+
+def make_foot_force(data: dict, out: Path) -> None:
+    """Left/right foot contact force magnitude over time."""
+    time = data["time"]
+    lf = data["foot_left_force"]
+    rf = data["foot_right_force"]
+    body_weight_n = 13.06 * 9.81
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(time, lf, color="C0", lw=1.3, label="left foot |F|")
+    ax.plot(time, rf, color="C1", lw=1.3, label="right foot |F|")
+    ax.axhline(body_weight_n, color="gray", ls=":", lw=0.7, label=f"1× BW ({body_weight_n:.0f} N)")
+    ax.axhline(2 * body_weight_n, color="orange", ls=":", lw=0.7, label="2× BW")
+    ax.axhline(350.0, color="red", ls="--", lw=0.7, alpha=0.7, label="ContactForcePenalty (350 N)")
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("foot contact force magnitude (N)")
+    ax.legend(fontsize=8, ncol=5, loc="upper right")
+    ax.grid(alpha=0.3)
+    ax.set_title("Foot contact force — single stance ~64 N, walking peak ~130–190 N")
+    plt.savefig(out / "foot_force.png", dpi=110, bbox_inches="tight")
     plt.close()
 
 
@@ -475,6 +523,34 @@ def print_fingerprints(data: dict, vx: float, vy: float) -> None:
     print(f"  Orient tilt STANCE (L/R): {_mean(l_tilt_deg, l_stance):.1f}° / {_mean(r_tilt_deg, r_stance):.1f}°   ← flat<5°, rolled edge>15°")
     print(f"  Stance fraction (L/R):    {100.0 * l_stance.mean():.0f}% / {100.0 * r_stance.mean():.0f}%")
     print()
+    # Foot strike force. Robot ~13 kg → static dual stance ~64 N/foot, normal
+    # walking peak 130–190 N (~1.5× body weight), hard slam >300 N.
+    # ContactForcePenalty (training) only fires above 350 N — anything below
+    # is invisible there but visible here.
+    lf = data["foot_left_force"]
+    rf = data["foot_right_force"]
+    body_weight_n = 13.06 * 9.81  # ~128 N total
+    # Stance-only force (filter out swing-phase numerical noise)
+    l_stance_force = lf[l_stance]
+    r_stance_force = rf[r_stance]
+    l_stance_mean = float(l_stance_force.mean()) if l_stance_force.size else float("nan")
+    r_stance_mean = float(r_stance_force.mean()) if r_stance_force.size else float("nan")
+    # Landing peaks: rising edges of contact = first stance step after swing,
+    # peak force in following 100 ms (5 steps at 20 ms ctrl_dt) per landing.
+    def _landing_peaks(stance_mask, force_arr, window=5):
+        rising = np.where((~stance_mask[:-1]) & stance_mask[1:])[0] + 1
+        peaks = [float(force_arr[i : min(i + window, len(force_arr))].max()) for i in rising]
+        return peaks
+    l_peaks = _landing_peaks(l_stance, lf)
+    r_peaks = _landing_peaks(r_stance, rf)
+    l_peak_mean = float(np.mean(l_peaks)) if l_peaks else float("nan")
+    r_peak_mean = float(np.mean(r_peaks)) if r_peaks else float("nan")
+    l_peak_max = float(np.max(l_peaks)) if l_peaks else float("nan")
+    r_peak_max = float(np.max(r_peaks)) if r_peaks else float("nan")
+    print(f"  Stance force MEAN (L/R):  {l_stance_mean:.0f} / {r_stance_mean:.0f} N   ({l_stance_mean/body_weight_n:.2f}× / {r_stance_mean/body_weight_n:.2f}× body weight, {body_weight_n:.0f} N)")
+    print(f"  Landing peak MEAN (L/R):  {l_peak_mean:.0f} / {r_peak_mean:.0f} N   (over {len(l_peaks)} / {len(r_peaks)} landings)")
+    print(f"  Landing peak MAX  (L/R):  {l_peak_max:.0f} / {r_peak_max:.0f} N   ← ContactForcePenalty fires >350 N")
+    print()
 
 
 def make_velocity_tracking(data: dict, out: Path, vx: float, vy: float) -> None:
@@ -546,6 +622,7 @@ def main():
     make_joint_traces(data, out, title)
     make_foot_pattern(data, out)
     make_foot_tilt(data, out)
+    make_foot_force(data, out)
     make_base_trajectory(data, out, args.vx, args.vy)
     make_velocity_tracking(data, out, args.vx, args.vy)
     print_fingerprints(data, args.vx, args.vy)
@@ -555,6 +632,7 @@ def main():
     print(f"  joint_traces.png      — joint angles vs time")
     print(f"  foot_pattern.png      — foot heights vs time")
     print(f"  foot_tilt.png         — heel/center/toe z + tilt range per foot")
+    print(f"  foot_force.png        — left/right contact force magnitude over time")
     print(f"  base_trajectory.png   — top-down xy path")
     print(f"  velocity_tracking.png — commanded vs actual vx, vy")
 
